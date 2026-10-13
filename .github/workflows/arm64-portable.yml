@@ -1,0 +1,133 @@
+name: Foundation Sunshine ARM64 portable (core only, unverified)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout Foundation source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2 CLANGARM64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: clangarm64
+          update: true
+          install: >-
+            git
+            python
+
+      - name: Install native ARM64 build dependencies
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          pacman -S --needed --noconfirm \
+            mingw-w64-clang-aarch64-toolchain \
+            mingw-w64-clang-aarch64-cmake \
+            mingw-w64-clang-aarch64-ninja \
+            mingw-w64-clang-aarch64-boost \
+            mingw-w64-clang-aarch64-cppwinrt \
+            mingw-w64-clang-aarch64-curl-winssl \
+            mingw-w64-clang-aarch64-miniupnpc \
+            mingw-w64-clang-aarch64-nlohmann-json \
+            mingw-w64-clang-aarch64-onevpl \
+            mingw-w64-clang-aarch64-openssl \
+            mingw-w64-clang-aarch64-opus \
+            mingw-w64-clang-aarch64-lld
+          cmake --version
+          clang++ --version
+
+      - name: Apply experimental Windows ARM64 fixes
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          python scripts/arm64_portable_patch.py
+
+      - name: Set up native Node.js for Web UI
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Build Web UI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build-arm64 | Out-Null
+          $env:SUNSHINE_SOURCE_ASSETS_DIR = "$env:GITHUB_WORKSPACE\src_assets"
+          $env:SUNSHINE_ASSETS_DIR = "$env:GITHUB_WORKSPACE\build-arm64"
+          npm ci
+          npm run build
+
+      - name: Configure ARM64 native program (no driver install)
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build-arm64 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_ENABLE_TRAY=OFF \
+            -DSUNSHINE_REQUIRE_TRAY=OFF \
+            -DSUNSHINE_RTX_HDR=OFF \
+            -DFETCH_GUI=OFF \
+            -DFETCH_DRIVER_DEPS=OFF \
+            -DDRIVER_DEPS_REQUIRED=OFF
+
+      - name: Build main executable
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          ninja -C build-arm64 sunshine
+          llvm-readobj --file-headers build-arm64/sunshine.exe | grep -i 'ARM64'
+
+      - name: Collect native binaries and runtime DLLs
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          stage=dist/Sunshine-Foundation-Windows-ARM64
+          mkdir -p "$stage"
+          cp build-arm64/sunshine.exe "$stage/"
+          cp -r build-arm64/assets "$stage/"
+          # Copy every MSYS2 CLANGARM64 runtime listed by ldd.
+          ldd build-arm64/sunshine.exe | tee build-arm64/runtime-deps.txt
+          awk '/=> \/clangarm64\/bin\// {print $3}' build-arm64/runtime-deps.txt | while read -r dll; do
+            [[ -f "$dll" ]] && cp "$dll" "$stage/"
+          done
+          # ARM64 MinHook shim ships as a dynamic DLL.
+          find build-arm64/_deps -type f -iname 'minhook-detours*.dll' -exec cp '{}' "$stage/" ';'
+          cat > "$stage/READ-FIRST.txt" <<'TXT'
+          Foundation Sunshine ARM64 CORE-ONLY EXPERIMENTAL portable prototype
+          - NOT COMPLETE: no ARM64 virtual display driver or signed installer included.
+          - Do not use install_portable.bat or any driver installation script.
+          - Run sunshine.exe in a normal, unelevated terminal for initial debugging.
+          - Native build success alone does not guarantee capture or encoding functionality.
+          - REQUIRED before acceptance: H.264 AND HEVC confirmed with Moonlight; ARM64 virtual display installed separately.
+          - For experimental software HEVC, set hevc_mode = 2 in Sunshine configuration.
+          - Do not use an x64 ZakoVDD driver; do not weaken Secure Boot for testing.
+          - Keep existing Sunshine installations unchanged until runtime validation.
+          TXT
+
+      - name: Reject non-ARM64 PE files
+        shell: pwsh
+        run: python scripts/check-arm64-pe.py dist/Sunshine-Foundation-Windows-ARM64
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/Sunshine-Foundation-Windows-ARM64' -DestinationPath 'dist/Sunshine-Foundation-Windows-ARM64-experimental.zip' -Force
+
+      - name: Upload portable experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundation-arm64-core-EXPERIMENTAL-not-validated
+          path: dist/Sunshine-Foundation-Windows-ARM64-experimental.zip
+          if-no-files-found: error
