@@ -68,15 +68,10 @@ set(CMAKE_RC_COMPILER windres)
 set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --use-temp-file")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 """,
-    """if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
-  find_program(SUNSHINE_ARM_RC NAMES llvm-windres windres)
-  if(SUNSHINE_ARM_RC)
-    set(CMAKE_RC_COMPILER "${SUNSHINE_ARM_RC}")
-  endif()
-else()
-  set(CMAKE_RC_COMPILER windres)
-  set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --use-temp-file")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    """# The ARM64 runner passes CMAKE_RC_COMPILER before project().
+# Reassigning it here forces CMake to clear its compiler cache and configure forever.
+if(NOT CMAKE_RC_COMPILER)
+  message(FATAL_ERROR "ARM64 resource compiler not configured before project()")
 endif()
 enable_language(RC)
 """
