@@ -33,19 +33,32 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euxo pipefail
-          pacman -S --needed --noconfirm \
-            mingw-w64-clang-aarch64-toolchain \
-            mingw-w64-clang-aarch64-cmake \
-            mingw-w64-clang-aarch64-ninja \
-            mingw-w64-clang-aarch64-boost \
-            mingw-w64-clang-aarch64-cppwinrt \
-            mingw-w64-clang-aarch64-curl-winssl \
-            mingw-w64-clang-aarch64-miniupnpc \
-            mingw-w64-clang-aarch64-nlohmann-json \
-            mingw-w64-clang-aarch64-onevpl \
-            mingw-w64-clang-aarch64-openssl \
-            mingw-w64-clang-aarch64-opus \
-            mingw-w64-clang-aarch64-lld
+          # Use MSYS2's official repo first; geo-redirected mirrors can stall in CI.
+          sed -i '1iServer = https://repo.msys2.org/mingw/$repo/' /etc/pacman.d/mirrorlist.mingw
+          sed -i '1iServer = https://repo.msys2.org/msys/$arch/' /etc/pacman.d/mirrorlist.msys
+          # Bound downloads and retry transient mirror/network failures.
+          for attempt in 1 2 3; do
+            if timeout 600 pacman --disable-download-timeout -S --needed --noconfirm \
+              mingw-w64-clang-aarch64-toolchain \
+                          mingw-w64-clang-aarch64-cmake \
+                          mingw-w64-clang-aarch64-ninja \
+                          mingw-w64-clang-aarch64-boost \
+                          mingw-w64-clang-aarch64-cppwinrt \
+                          mingw-w64-clang-aarch64-curl-winssl \
+                          mingw-w64-clang-aarch64-miniupnpc \
+                          mingw-w64-clang-aarch64-nlohmann-json \
+                          mingw-w64-clang-aarch64-onevpl \
+                          mingw-w64-clang-aarch64-openssl \
+                          mingw-w64-clang-aarch64-opus \
+                          mingw-w64-clang-aarch64-lld; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "MSYS2 package installation failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 15))"
+          done
           cmake --version
           clang++ --version
 
