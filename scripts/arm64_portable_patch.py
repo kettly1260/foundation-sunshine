@@ -92,4 +92,14 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
 endif()
 """
 )])
+# The Foundation tree pins NVENC API headers by SDK version (1301/1300/1200/1100),
+# but its generic include root does not itself contain ffnvcodec/nvEncodeAPI.h.
+# Expose the latest pinned headers for general compilation (e.g. config.cpp).
+# Per-version NVENC factory sources retain their explicitly pinned includes.
+edit_file("cmake/compile_definitions/windows.cmake", [(
+    'include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvenc-headers")',
+    'include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvenc-headers/1301/include")\n'
+    'include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvenc-headers")'
+)])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
