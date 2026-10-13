@@ -71,9 +71,14 @@ jobs:
 
       - name: Configure ARM64 native program (no driver install)
         shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
         run: |
           set -euxo pipefail
+          command -v npm
+          command -v windres
           cmake -S . -B build-arm64 -G Ninja \
+            -DCMAKE_RC_COMPILER="$(cygpath -w "$(command -v windres)")" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DOCS=OFF \
             -DBUILD_TESTS=OFF \
