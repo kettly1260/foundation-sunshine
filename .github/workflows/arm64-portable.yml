@@ -78,7 +78,7 @@ jobs:
           command -v npm
           command -v windres
           cmake -S . -B build-arm64 -G Ninja \
-            -DCMAKE_RC_COMPILER="$(cygpath -w "$(command -v windres)")" \
+            -DCMAKE_RC_COMPILER="$(cygpath -m "$(command -v windres)")" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DOCS=OFF \
             -DBUILD_TESTS=OFF \
