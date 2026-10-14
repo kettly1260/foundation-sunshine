@@ -182,4 +182,15 @@ edit_file("src/platform/windows/display_device/color_profile.cpp", [(
     "    const auto extended_display_color_mode = static_cast<COLORPROFILESUBTYPE>(8);"
 )])
 
+
+# Opt-in, ARM64-only upstream Media Foundation backend. This modifies the
+# checked-out source in CI rather than replacing Foundation's streaming stack.
+# Foundation build-deps already contains h264_mf, hevc_mf, av1_mf and D3D11VA.
+edit_file("src/video.cpp", [
+    ("    ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread\n", "    ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread\n    FIXED_GOP_SIZE = 1 << 12,  ///< Media Foundation uses periodic keyframes instead of on-demand IDR\n"),
+    ("  encoder_t software {\n", "#ifdef _WIN32\n  // Windows Media Foundation provides vendor-neutral hardware video encoding.\n  // Ported from upstream LizardByte/Sunshine; capabilities are probed per codec.\n  encoder_t mediafoundation {\n    \"mediafoundation\"sv,\n    std::make_unique<encoder_platform_formats_avcodec>(\n      AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_NONE,\n      AV_PIX_FMT_D3D11,\n      AV_PIX_FMT_NV12, AV_PIX_FMT_NONE,\n      AV_PIX_FMT_NONE, AV_PIX_FMT_NONE,\n      dxgi_init_avcodec_hardware_input_buffer),\n    {\n      {\n        { \"hw_encoding\"s, 1 },\n        { \"rate_control\"s, \"cbr\"s },\n        { \"scenario\"s, \"display_remoting\"s },\n      },\n      {}, {}, {}, {}, {},\n      \"av1_mf\"s,\n    },\n    {\n      {\n        { \"hw_encoding\"s, 1 },\n        { \"rate_control\"s, \"cbr\"s },\n        { \"scenario\"s, \"display_remoting\"s },\n      },\n      {}, {}, {}, {}, {},\n      \"hevc_mf\"s,\n    },\n    {\n      {\n        { \"hw_encoding\"s, 1 },\n        { \"rate_control\"s, \"cbr\"s },\n        { \"scenario\"s, \"display_remoting\"s },\n      },\n      {}, {}, {}, {}, {},\n      \"h264_mf\"s,\n    },\n    PARALLEL_ENCODING | FIXED_GOP_SIZE\n  };\n#endif\n\n  encoder_t software {\n"),
+    ("  static const std::vector<encoder_t *> encoders {\n#ifndef __APPLE__", "  static const std::vector<encoder_t *> encoders {\n#ifdef _WIN32\n    &mediafoundation,\n#endif\n#ifndef __APPLE__"),
+    ("      // Use an infinite GOP length since I-frames are generated on demand\n      ctx->gop_size = encoder.flags & LIMITED_GOP_SIZE ?\n                        std::numeric_limits<std::int16_t>::max() :\n                        std::numeric_limits<int>::max();\n\n      ctx->keyint_min = std::numeric_limits<int>::max();", "      // Media Foundation does not reliably honor on-demand IDR requests.\n      // Use a bounded GOP rather than the infinite GOP of other backends.\n      if (encoder.flags & FIXED_GOP_SIZE) {\n        ctx->gop_size = 120;\n        ctx->keyint_min = 120;\n      }\n      else {\n        ctx->gop_size = encoder.flags & LIMITED_GOP_SIZE ?\n                          std::numeric_limits<std::int16_t>::max() :\n                          std::numeric_limits<int>::max();\n        ctx->keyint_min = std::numeric_limits<int>::max();\n      }")
+])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
