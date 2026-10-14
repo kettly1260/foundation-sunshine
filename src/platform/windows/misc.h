@@ -6,8 +6,10 @@
 
 #include <chrono>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 #include <windows.h>
 #include <winnt.h>
 
