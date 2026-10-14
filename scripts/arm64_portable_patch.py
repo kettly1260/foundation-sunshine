@@ -162,4 +162,24 @@ edit_file("src/confighttp.cpp", [(
     "if (!std::atomic_compare_exchange_strong(&log_cache, &snapshot, std::shared_ptr<const LogCacheSnapshot>(new_snap))) {"
 )])
 
+
+# The bundled Steam Streaming Speakers INF is x64-only. On Windows ARM64,
+# install_steam_audio_drivers() is already gated by STEAM_DRIVER_SUBDIR; the
+# associated path declaration must be gated too. Keep normal audio enabled.
+edit_file("src/platform/windows/audio.cpp", [(
+    "  constexpr auto STEAM_AUDIO_DRIVER_PATH =",
+    "#ifdef STEAM_DRIVER_SUBDIR\n  constexpr auto STEAM_AUDIO_DRIVER_PATH ="
+), (
+    "  constexpr auto waveformat_mask_stereo =",
+    "#endif\n\n  constexpr auto waveformat_mask_stereo ="
+)])
+
+# The older MinGW COLORPROFILESUBTYPE enum covers only 0..7; Windows WCS uses
+# 8 for its extended display color mode. Clang rejects the cast in a constexpr
+# initializer, so preserve its runtime API value with a non-constexpr object.
+edit_file("src/platform/windows/display_device/color_profile.cpp", [(
+    "    constexpr auto extended_display_color_mode = static_cast<COLORPROFILESUBTYPE>(8);",
+    "    const auto extended_display_color_mode = static_cast<COLORPROFILESUBTYPE>(8);"
+)])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
