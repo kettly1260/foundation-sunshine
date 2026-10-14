@@ -149,4 +149,17 @@ edit_file("src/webhook/webhook.cpp", [(
     "const auto configuration = std::atomic_load_explicit(&active_configuration, std::memory_order_acquire);"
 )])
 
+# libc++ in CLANGARM64 rejects atomic<shared_ptr<T>>. Preserve log cache
+# snapshot CAS semantics via the standard shared_ptr atomic free functions.
+edit_file("src/confighttp.cpp", [(
+    "static std::atomic<std::shared_ptr<const LogCacheSnapshot>> log_cache;",
+    "static std::shared_ptr<const LogCacheSnapshot> log_cache;"
+), (
+    "auto snapshot = log_cache.load();",
+    "auto snapshot = std::atomic_load(&log_cache);"
+), (
+    "if (!log_cache.compare_exchange_strong(snapshot, new_snap)) {",
+    "if (!std::atomic_compare_exchange_strong(&log_cache, &snapshot, std::shared_ptr<const LogCacheSnapshot>(new_snap))) {"
+)])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
