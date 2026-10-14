@@ -128,4 +128,25 @@ edit_file("src/config.cpp", [(
     '#endif'
 )])
 
+# MSYS2 CLANGARM64's libc++ rejects std::atomic<shared_ptr<T>>.
+# Use the C++ shared_ptr atomic free functions to retain acquire/release
+# synchronization and immutable snapshots across config publishers/readers.
+edit_file("src/webhook/webhook.cpp", [(
+    "std::atomic<std::shared_ptr<const configuration_t>> active_configuration {",
+    "std::shared_ptr<const configuration_t> active_configuration {"
+), (
+    """active_configuration.store(
+      std::move(configuration.configuration_),
+      std::memory_order_release
+    );""",
+    """std::atomic_store_explicit(
+      &active_configuration,
+      std::move(configuration.configuration_),
+      std::memory_order_release
+    );"""
+), (
+    "const auto configuration = active_configuration.load(std::memory_order_acquire);",
+    "const auto configuration = std::atomic_load_explicit(&active_configuration, std::memory_order_acquire);"
+)])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
