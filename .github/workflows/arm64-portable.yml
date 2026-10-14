@@ -119,11 +119,9 @@ jobs:
           mkdir -p "$stage"
           cp build-arm64/sunshine.exe "$stage/"
           cp -r build-arm64/assets "$stage/"
-          # Copy every MSYS2 CLANGARM64 runtime listed by ldd.
-          ldd build-arm64/sunshine.exe | tee build-arm64/runtime-deps.txt
-          awk '/=> \/clangarm64\/bin\// {print $3}' build-arm64/runtime-deps.txt | while read -r dll; do
-            [[ -f "$dll" ]] && cp "$dll" "$stage/"
-          done
+          # Inspect the PE import table without executing any DLL code.
+          # 'ldd' can hang on certain Windows DLLs (e.g. libminiupnpc).
+          llvm-readobj --coff-imports build-arm64/sunshine.exe > build-arm64/runtime-imports.txt
           # Bundle only the native ARM64 MinHook shim. The release archive also
           # contains x86/x64 variants, which must never enter an ARM64 ZIP.
           minhook_dll="$(find build-arm64/_deps -type f -name 'minhook-detours.ARM64.Release.dll' -print -quit)"
@@ -132,25 +130,29 @@ jobs:
             exit 1
           fi
           cp "$minhook_dll" "$stage/"
-          # Resolve the transitive closure of CLANGARM64 DLL dependencies;
-          # running ldd on sunshine.exe alone misses dependencies of libcurl.
+          # Recursively resolve DLL import names against CLANGARM64 runtime.
+          # llvm-readobj is a static PE parser, so no DLL initialization occurs.
+          # System DLLs remain provided by Windows rather than packaged here.
           for pass in {1..25}; do
             added=0
             for binary in "$stage"/*.exe "$stage"/*.dll; do
               [[ -f "$binary" ]] || continue
-              while IFS= read -r dep; do
-                name="${dep##*/}"
-                if [[ ! -f "$stage/$name" ]]; then
-                  cp "$dep" "$stage/"
+              while IFS= read -r name; do
+                [[ -n "$name" ]] || continue
+                [[ -f "$stage/$name" ]] && continue
+                source="/clangarm64/bin/$name"
+                if [[ -f "$source" ]]; then
+                  cp "$source" "$stage/"
                   echo "Bundled runtime: $name (from ${binary##*/})"
                   ((added+=1))
                 fi
-              done < <(ldd "$binary" | awk '$2 == "=>" && index($3, "/clangarm64/bin/") == 1 { print $3 }')
+              done < <(llvm-readobj --coff-imports "$binary" |
+                awk '/^[[:space:]]*Name:[[:space:]]+/ {print $2}')
             done
-            echo "DLL dependency pass $pass: added $added"
+            echo "Static PE dependency pass $pass: added $added"
             if ((added == 0)); then break; fi
             if ((pass == 25)); then
-              echo "DLL dependency closure did not converge" >&2
+              echo "Static PE dependency closure did not converge" >&2
               exit 1
             fi
           done
