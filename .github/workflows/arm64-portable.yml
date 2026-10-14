@@ -124,8 +124,14 @@ jobs:
           awk '/=> \/clangarm64\/bin\// {print $3}' build-arm64/runtime-deps.txt | while read -r dll; do
             [[ -f "$dll" ]] && cp "$dll" "$stage/"
           done
-          # ARM64 MinHook shim ships as a dynamic DLL.
-          find build-arm64/_deps -type f -iname 'minhook-detours*.dll' -exec cp '{}' "$stage/" ';'
+          # Bundle only the native ARM64 MinHook shim. The release archive also
+          # contains x86/x64 variants, which must never enter an ARM64 ZIP.
+          minhook_dll="$(find build-arm64/_deps -type f -name 'minhook-detours.ARM64.Release.dll' -print -quit)"
+          if [[ -z "$minhook_dll" || ! -f "$minhook_dll" ]]; then
+            echo "Missing ARM64 MinHook runtime DLL" >&2
+            exit 1
+          fi
+          cp "$minhook_dll" "$stage/"
           cat > "$stage/READ-FIRST.txt" <<'TXT'
           Foundation Sunshine ARM64 CORE-ONLY EXPERIMENTAL portable prototype
           - NOT COMPLETE: no ARM64 virtual display driver or signed installer included.
