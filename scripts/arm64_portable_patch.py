@@ -102,4 +102,30 @@ edit_file("cmake/compile_definitions/windows.cmake", [(
     'include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvenc-headers")'
 )])
 
+# AMD AMF SDK headers must be included at global scope. The stock source
+# includes them *inside* namespace config::amd, which nests C++ declarations
+# like std::optional in config::amd::std under clang/LLVM and breaks build.
+edit_file("src/config.cpp", [(
+    '#include "globals.h"\n\n',
+    '#include "globals.h"\n\n'
+    '#ifdef _WIN32\n'
+    '  #ifdef _GLIBCXX_USE_C99_INTTYPES\n'
+    '    #undef _GLIBCXX_USE_C99_INTTYPES\n'
+    '  #endif\n'
+    '  #include <AMF/components/VideoEncoderAV1.h>\n'
+    '  #include <AMF/components/VideoEncoderHEVC.h>\n'
+    '  #include <AMF/components/VideoEncoderVCE.h>\n'
+    '#endif\n\n'
+), (
+    '#else\n'
+    '  #ifdef _GLIBCXX_USE_C99_INTTYPES\n'
+    '    #undef _GLIBCXX_USE_C99_INTTYPES\n'
+    '  #endif\n'
+    '  #include <AMF/components/VideoEncoderAV1.h>\n'
+    '  #include <AMF/components/VideoEncoderHEVC.h>\n'
+    '  #include <AMF/components/VideoEncoderVCE.h>\n'
+    '#endif',
+    '#endif'
+)])
+
 print("ARM64 compatibility bootstrap applied; native build still requires CI validation.")
