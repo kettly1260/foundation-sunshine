@@ -132,6 +132,37 @@ jobs:
             exit 1
           fi
           cp "$minhook_dll" "$stage/"
+          # Resolve the transitive closure of CLANGARM64 DLL dependencies;
+          # running ldd on sunshine.exe alone misses dependencies of libcurl.
+          for pass in {1..25}; do
+            added=0
+            for binary in "$stage"/*.exe "$stage"/*.dll; do
+              [[ -f "$binary" ]] || continue
+              while IFS= read -r dep; do
+                name="${dep##*/}"
+                if [[ ! -f "$stage/$name" ]]; then
+                  cp "$dep" "$stage/"
+                  echo "Bundled runtime: $name (from ${binary##*/})"
+                  ((added+=1))
+                fi
+              done < <(ldd "$binary" | awk '$2 == "=>" && index($3, "/clangarm64/bin/") == 1 { print $3 }')
+            done
+            echo "DLL dependency pass $pass: added $added"
+            if ((added == 0)); then break; fi
+            if ((pass == 25)); then
+              echo "DLL dependency closure did not converge" >&2
+              exit 1
+            fi
+          done
+          # Known missing runtime libraries from the first portable release.
+          for name in zlib1.dll libssh2-1.dll libidn2-0.dll; do
+            source="/clangarm64/bin/$name"
+            if [[ ! -f "$source" ]]; then
+              echo "CLANGARM64 runtime not installed: $source" >&2
+              exit 1
+            fi
+            cp -n "$source" "$stage/"
+          done
           cat > "$stage/READ-FIRST.txt" <<'TXT'
           Foundation Sunshine ARM64 CORE-ONLY EXPERIMENTAL portable prototype
           - NOT COMPLETE: no ARM64 virtual display driver or signed installer included.
@@ -152,6 +183,32 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path 'dist/Sunshine-Foundation-Windows-ARM64' -DestinationPath 'dist/Sunshine-Foundation-Windows-ARM64-experimental.zip' -Force
+
+      - name: Smoke-test extracted ARM64 ZIP with system-only DLL PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP 'foundation-arm64-smoke'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Expand-Archive -LiteralPath 'dist/Sunshine-Foundation-Windows-ARM64-experimental.zip' -DestinationPath $destination -Force
+          $stage = Join-Path $destination 'Sunshine-Foundation-Windows-ARM64'
+          $exe = Join-Path $stage 'sunshine.exe'
+          if (!(Test-Path -LiteralPath $exe)) { throw 'The portable ZIP is missing sunshine.exe' }
+          foreach ($name in @('zlib1.dll','libssh2-1.dll','libidn2-0.dll','minhook-detours.ARM64.Release.dll')) {
+            if (!(Test-Path -LiteralPath (Join-Path $stage $name))) { throw "Missing packaged DLL: $name" }
+          }
+          # Do not allow DLLs installed on the CI runner to mask packaging bugs.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $stage -NoNewWindow -PassThru -ErrorAction Stop
+          if (!$proc.WaitForExit(30000)) {
+            $proc.Kill()
+            throw 'sunshine.exe --version timed out'
+          }
+          $proc.Refresh()
+          if ($proc.ExitCode -ne 0) {
+            throw "sunshine.exe --version failed with code $($proc.ExitCode)"
+          }
+          Write-Host 'PASS: extracted ARM64 portable ZIP starts with a system-only DLL search path.'
 
       - name: Upload portable experiment
         uses: actions/upload-artifact@v4
