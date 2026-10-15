@@ -1,6 +1,12 @@
 name: Native MFT ARM64 capability probe
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - tools/native-mf/**
+      - .github/workflows/native-mf-arm64.yml
 permissions:
   contents: read
 jobs:
@@ -16,8 +22,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          cl /nologo /EHsc /std:c++17 /W4 /Fe:dist/native_mft_probe.exe tools/native-mf/native_mft_probe.cpp /link mfplat.lib mfuuid.lib ole32.lib
-          if ($LASTEXITCODE -ne 0) { throw "Native MFT compile failed" }
+          cl /nologo /EHsc /std:c++17 /W4 /Fe:dist/native_mft_probe.exe tools/native-mf/native_mft_probe.cpp /link mfplat.lib mfuuid.lib ole32.lib oleaut32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Native MFT compile failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: native-mf-arm64-probe
