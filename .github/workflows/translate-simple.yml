@@ -1,11 +1,7 @@
 name: Simple README Translation
 
+# Fork: translations run only when explicitly requested.
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - 'README.md'
   workflow_dispatch:
 
 jobs:
