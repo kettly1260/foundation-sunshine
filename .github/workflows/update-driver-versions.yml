@@ -24,8 +24,6 @@ on:
         required: false
         default: ''
         type: string
-  repository_dispatch:
-    types: [driver-release]
 
 jobs:
   update-version:
