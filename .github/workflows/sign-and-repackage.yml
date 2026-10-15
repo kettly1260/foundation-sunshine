@@ -10,9 +10,8 @@
 
 name: Sign and Repackage (Release Only)
 
+# Fork: signing is opt-in only, never auto-run on release publication.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       ref:
