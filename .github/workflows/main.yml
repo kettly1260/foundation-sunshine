@@ -3,17 +3,8 @@ name: Build and Release
 # Published releases are owned by sign-and-repackage.yml. Keeping that event
 # out of this workflow prevents a release created below from starting another
 # build-and-release cycle.
+# Fork CI: manual runs only; do not build and release on every push.
 on:
-  pull_request:
-    branches:
-      - master
-    types:
-      - opened
-      - synchronize
-      - reopened
-  push:
-    branches:
-      - master
   workflow_dispatch:
     inputs:
       gui_run_id:
