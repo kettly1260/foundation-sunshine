@@ -164,7 +164,9 @@ public:
         if (output) {
           check(type->SetUINT32(MF_MT_AVG_BITRATE, bitrate_kbps * 1000), "AvgBitrate");
           if (codec == codec_e::h264) {
-            check(type->SetUINT32(MF_MT_VIDEO_PROFILE, eAVEncH264VProfile_Main), "H264 Main");
+            // Windows MF declares VIDEO_PROFILE as an alias of MPEG2_PROFILE.
+            // MinGW exposes only the original name.
+            check(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main), "H264 Main");
           } else if (codec == codec_e::hevc) {
             check(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8), "HEVC Main");
           } else {
