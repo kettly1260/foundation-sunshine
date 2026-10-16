@@ -17,12 +17,13 @@ FFmpeg Media Foundation path.
 
 **Known target-device result:** With `encoder = mf_native`, 1080p60 H.264
 reached 58.47 FPS and 18.3 ms average Moonlight-reported host processing
-latency, versus >100 ms in the original FFmpeg MF path. Independent HEVC
-hardware D3D11 benchmarking produced approximately 15.4 ms steady-state
-latency, but a separate `mf_native` HEVC Moonlight test is still required.
+latency, versus >100 ms in the original FFmpeg MF path. At 2560x1600 60 FPS,
+Moonlight reported approximately 10.1 ms H.264 and 9.5 ms HEVC average host
+processing latency before the frame-suppression experiment. Those averages
+do not guarantee smooth frame pacing.
 
 **Not yet validated:** HDR/P010, YUV444, Dolby Vision, dynamic HDR metadata,
-HEVC Moonlight playback, live bitrate reconfiguration, runtime encoder recovery,
+HEVC Moonlight playback under extended workloads, live bitrate reconfiguration, runtime encoder recovery,
 and real-game latency. An earlier successful H.264 test does not qualify later
 CI changes as runtime validated.
 
@@ -39,7 +40,8 @@ portable package without installing a Windows service or virtual driver.
 - Do **not** overwrite your working Sunshine folder or install drivers.
 - Native builds contain an **opt-in** encoder called `mf_native`.
 - To test native MFT, configure `encoder = mf_native`, restart the standalone
-  Sunshine executable, and select supported codec in Moonlight.
+  Sunshine executable, and select H.264 or HEVC in Moonlight (AV1 is disabled
+  for this backend until the Qualcomm driver path is corrected).
 - If it fails, revert the configuration to the previously working encoder
   (e.g., `mediafoundation`) and use the known-good Sunshine package.
 
@@ -77,6 +79,52 @@ decoder latency. A successful CI build does not prove Moonlight playback.
    network conditions with the original FFmpeg Media Foundation path.
 
 If any gate fails, remain on the proven working version.
+
+## Qualcomm frame-drop investigation (2026-10-16)
+
+The first experimental H.264 streamer generated hundreds of
+`Native MFT returned ... zero-byte encoded sample(s)` log entries in
+bursts. Skipping empty samples avoided encoder reconstruction, **but did not
+prevent actual frame suppression**. No network loss or decoder bottleneck was
+observed in those reports.
+
+**Change under test:** FFmpeg `libavcodec/mfenc.c` explicitly documents that
+Qualcomm hardware MF uses VFR by default in some scenarios, and
+`CODECAPI_AVScenarioInfo = eAVScenarioInfo_CameraRecord` enables CFR to avoid
+dropping frames. Chromium's
+[`MediaFoundationVideoEncodeAccelerator`](https://chromium.googlesource.com/chromium/src/media/+/24e0453977d38aada35c5e78fcec3d11d6cdea6e/gpu/windows/media_foundation_video_encode_accelerator_win.cc)
+applies the same Qualcomm-specific workaround for
+[`crbug.com/343757695`](https://crbug.com/343757695). We already explicitly
+configure zero B-frames; the missing scenario setting is now present in the
+**experimental** encoder only. Other GPU vendors retain their existing
+encoder scenario.
+
+New diagnostic records are emitted at most once per second when empty samples
+occur. They include empty and valid encoded counts, sample buffer count,
+length and output flags. No packet is fabricated for an empty sample; eight
+consecutive zero-byte samples remain a fatal encoder error.
+
+### X Elite acceptance test
+
+1. Preserve your previously working build, and use a **separate** Sunshine
+   folder from the new successful GitHub Actions artifact.
+2. Use `encoder = mf_native`, SDR, 2560x1600, 60 FPS, H.264 for 5 minutes
+   on a mostly static desktop followed by window animation/mouse activity.
+   Repeat for HEVC with the same scene and bitrate.
+3. Verify each active session logs
+   `Native MFT Qualcomm CameraRecord CFR enabled`. If missing, this test does
+   **not** validate the new workaround.
+4. Compare empty-output diagnostic totals and Moonlight incoming FPS/host
+   processing latency to the prior build. Look for encoder restarts,
+   artificial output gaps, AV-sync issues and visual artifacts.
+5. A clean CI build is not evidence that the driver accepts the scenario
+   or actually outputs every frame. Treat sustained zero-byte outputs as
+   unresolved even if Moonlight reports a good average FPS.
+
+Do not tune 90/120 FPS or HDR until the 60 FPS H.264 and HEVC
+hardware output is stable. The desktop `Minimum frame time = 33.3333 ms`
+line describes Foundation's configurable wait ceiling, **not a mandatory
+30 FPS limiter**.
 
 ## Upstream selective backports
 
