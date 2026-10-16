@@ -168,7 +168,9 @@ public:
           } else if (codec == codec_e::hevc) {
             check(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8), "HEVC Main");
           } else {
-            check(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncAV1VProfile_Main), "AV1 Main");
+            // AV1 Main is profile 0. The Windows 11 26100 SDK lacks
+            // eAVEncAV1VProfile_Main (present in some vendor SDKs).
+            check(type->SetUINT32(MF_MT_MPEG2_PROFILE, 0), "AV1 Main");
           }
         }
         return type;
