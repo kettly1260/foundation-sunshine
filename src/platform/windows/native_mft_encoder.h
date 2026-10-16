@@ -58,6 +58,23 @@ struct encoded_frame_t {
 
 class encoder_t {
 public:
+  struct empty_output_diagnostics_t {
+    size_t skipped_since_last = 0;
+    size_t encoded_since_last = 0;
+    size_t skipped_total = 0;
+    size_t encoded_total = 0;
+    DWORD output_status = 0;
+    DWORD process_status = 0;
+    DWORD output_stream_flags = 0;
+    DWORD sample_buffer_count = 0;
+    DWORD sample_total_length = 0;
+    DWORD sample_buffer_capacity = 0;
+    DWORD sample_flags = 0;
+    std::int64_t frame_index = -1;
+    bool requested_keyframe = false;
+    bool output_mft_owned = false;
+  };
+
   encoder_t() = default;
   encoder_t(const encoder_t &) = delete;
   encoder_t &operator=(const encoder_t &) = delete;
@@ -117,7 +134,24 @@ public:
       for (UINT32 i = 0; i < count; ++i) {
         if (!transform_) {
           HRESULT hr = found[i]->ActivateObject(IID_PPV_ARGS(&transform_));
-          if (FAILED(hr)) transform_.Reset();
+          if (FAILED(hr)) {
+            transform_.Reset();
+          } else {
+            // Chromium's Qualcomm Media Foundation path and FFmpeg both note
+            // that QCOM defaults to variable-frame-rate behavior which can
+            // generate dropped/empty encoded samples. Identify the selected
+            // hardware MFT, not merely the GPU, before enabling its CFR fix.
+            WCHAR *friendly_name = nullptr;
+            UINT32 friendly_length = 0;
+            if (SUCCEEDED(found[i]->GetAllocatedString(
+                  MFT_FRIENDLY_NAME_Attribute, &friendly_name, &friendly_length))
+                && friendly_name) {
+              const std::wstring name {friendly_name};
+              qualcomm_mft_ = name.find(L"QCOM") != std::wstring::npos ||
+                              name.find(L"Qualcomm") != std::wstring::npos;
+              CoTaskMemFree(friendly_name);
+            }
+          }
         }
         found[i]->Release();
       }
@@ -146,6 +180,19 @@ public:
       set_u32(CODECAPI_AVEncMPVDefaultBPictureCount, 0);
       set_u32(CODECAPI_AVEncMPVGOPSize, std::max(30u, fps_n / fps_d * 2));
       set_bitrate(bitrate_kbps);
+      if (qualcomm_mft_) {
+        // Qualcomm Media Foundation defaults to VFR in some scenarios. Both
+        // Chromium's Windows MF encoder (crbug.com/343757695) and FFmpeg
+        // mfenc.c document that CameraRecord enables CFR and avoids dropped
+        // frames. Keep this Qualcomm-only; other vendors have different
+        // optimal remoting scenarios.
+        VARIANT scenario {};
+        scenario.vt = VT_UI4;
+        scenario.ulVal = eAVScenarioInfo_CameraRecord;
+        check(codec_api_->SetValue(&CODECAPI_AVScenarioInfo, &scenario),
+              "Qualcomm CFR: CODECAPI_AVScenarioInfo CameraRecord");
+        qualcomm_cfr_active_ = true;
+      }
 
       device->GetImmediateContext(&context_);
       if (!context_) throw std::runtime_error("D3D11 immediate context missing");
@@ -295,10 +342,22 @@ public:
   }
 
   size_t pending_count() const { return pending_.size(); }
-  // Count only samples already consumed from ProcessOutput. Reporting is done
-  // by Sunshine, rather than requiring its logging dependencies in this header.
-  size_t take_empty_output_count() {
-    return std::exchange(empty_output_count_since_report_, size_t {0});
+  bool qualcomm_cfr_active() const { return qualcomm_cfr_active_; }
+  // First empty sample is reported immediately, followed by at most one
+  // diagnostic per second while the output anomaly persists. Normal frames
+  // continue without modifying the packet pipeline.
+  std::optional<empty_output_diagnostics_t> take_empty_output_diagnostics() {
+    if (!empty_diagnostics_.skipped_since_last) return std::nullopt;
+    const auto now = steady_clock::now();
+    if (last_empty_diagnostics_report_ != steady_clock::time_point::min() &&
+        now - last_empty_diagnostics_report_ < std::chrono::seconds(1)) {
+      return std::nullopt;
+    }
+    const auto result = empty_diagnostics_;
+    last_empty_diagnostics_report_ = now;
+    empty_diagnostics_.skipped_since_last = 0;
+    empty_diagnostics_.encoded_since_last = 0;
+    return result;
   }
 
 private:
@@ -379,17 +438,35 @@ private:
     check(sample->GetSampleTime(&pts),"MFT output timestamp");
     auto it=pending_.find(pts);
     if (it==pending_.end()) throw std::runtime_error("MFT output timestamp does not match input");
+    DWORD sample_buffer_count = 0;
+    (void) sample->GetBufferCount(&sample_buffer_count);
     ComPtr<IMFMediaBuffer> contiguous;
     check(sample->ConvertToContiguousBuffer(&contiguous),"MFT encoded buffer");
     DWORD length=0;
     check(contiguous->GetCurrentLength(&length),"MFT encoded buffer length");
     if (length == 0) {
+      DWORD sample_total_length = 0;
+      DWORD sample_flags = 0;
+      (void) sample->GetTotalLength(&sample_total_length);
+      (void) sample->GetSampleFlags(&sample_flags);
       // The Qualcomm encoder can return a successful output sample containing
       // no coded bytes. This represents no packet to transmit, not a valid
       // bitstream packet. Release the corresponding input texture, count the
       // skipped frame, and preserve the rest of the running stream instead of
       // tearing the MFT down and interrupting Moonlight.
-      ++empty_output_count_since_report_;
+      auto &diag = empty_diagnostics_;
+      ++diag.skipped_since_last;
+      ++diag.skipped_total;
+      diag.output_status = out.dwStatus;
+      diag.process_status = status;
+      diag.output_stream_flags = output_info_.dwFlags;
+      diag.sample_buffer_count = sample_buffer_count;
+      diag.sample_total_length = sample_total_length;
+      (void) contiguous->GetMaxLength(&diag.sample_buffer_capacity);
+      diag.sample_flags = sample_flags;
+      diag.frame_index = it->second.index;
+      diag.requested_keyframe = it->second.requested_keyframe;
+      diag.output_mft_owned = output_provided_;
       if (++consecutive_empty_outputs_ >= 8) {
         throw std::runtime_error(
           "MFT returned at least 8 consecutive zero-byte encoded samples");
@@ -418,11 +495,15 @@ private:
     contiguous->Unlock();
     slots_[it->second.slot].busy=false;
     pending_.erase(it);
+    ++empty_diagnostics_.encoded_since_last;
+    ++empty_diagnostics_.encoded_total;
     ready.push_back(std::move(packet));
   }
 
   bool co_initialized_=false;
   bool mf_started_=false;
+  bool qualcomm_mft_=false;
+  bool qualcomm_cfr_active_=false;
   codec_e codec_=codec_e::h264;
   unsigned width_=0,height_=0,fps_n_=0,fps_d_=1;
   ComPtr<IMFTransform> transform_;
@@ -434,7 +515,9 @@ private:
   bool output_provided_=false;
   DWORD input_id_=0,output_id_=0;
   unsigned input_requests_=0;
-  size_t empty_output_count_since_report_=0;
+  empty_output_diagnostics_t empty_diagnostics_ {};
+  steady_clock::time_point last_empty_diagnostics_report_ =
+    steady_clock::time_point::min();
   unsigned consecutive_empty_outputs_=0;
   bool retry_keyframe_after_empty_=false;
   std::array<slot_t,12> slots_ {};
