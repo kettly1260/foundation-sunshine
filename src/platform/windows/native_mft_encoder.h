@@ -132,7 +132,12 @@ public:
         throw std::runtime_error("MFT is not D3D11 aware");
       check(attr->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE), "MFT async unlock");
       check(transform_.As(&events_), "MFT event generator");
-      check(transform_.As(&codec_api_), "MFT ICodecAPI");
+      // MinGW's WRL ComPtr::As<ICodecAPI> may instantiate an unresolved
+      // __mingw_uuidof<ICodecAPI>() at link time. Use the declared COM IID
+      // directly instead of relying on the C++ __uuidof specialization.
+      check(transform_->QueryInterface(IID_ICodecAPI,
+            reinterpret_cast<void **>(codec_api_.ReleaseAndGetAddressOf())),
+            "MFT ICodecAPI");
 
       set_bool(CODECAPI_AVLowLatencyMode);
       set_bool(CODECAPI_AVEncCommonLowLatency);
