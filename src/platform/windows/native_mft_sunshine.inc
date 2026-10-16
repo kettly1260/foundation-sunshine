@@ -80,8 +80,8 @@ make_native_mft_encode_session(const config_t &config,
   frames->width = config.width;
   frames->height = config.height;
   converter->init_hwframes(frames);
-  if (auto error = av_hwframe_ctx_init(hw_frames.get())) {
-    BOOST_LOG(error) << "Native MFT: FFmpeg D3D11 input frame allocation failed: " << error;
+  if (auto init_result = av_hwframe_ctx_init(hw_frames.get())) {
+    BOOST_LOG(error) << "Native MFT: FFmpeg D3D11 input frame allocation failed: " << init_result;
     return nullptr;
   }
 
@@ -147,9 +147,9 @@ int collect_native_mft_outputs(
   auto *native = dynamic_cast<native_mft_encode_session_t *>(&session);
   if (!native) return 0;
   std::vector<native_mft::encoded_frame_t> ready;
-  std::string error;
-  if (!native->poll(ready, error)) {
-    BOOST_LOG(error) << "Native MFT output failed: " << error;
+  std::string status_text;
+  if (!native->poll(ready, status_text)) {
+    BOOST_LOG(error) << "Native MFT output failed: " << status_text;
     return -1;
   }
   return emit_native_mft_packets(*native, ready, packets, channel_data);
@@ -172,9 +172,9 @@ int encode_native_mft(
   session.frame_timestamps.store(index, frame_timestamp, std::move(pipeline_trace),
                                  session.fec_percentage());
   std::vector<native_mft::encoded_frame_t> ready;
-  std::string error;
-  if (!session.submit(frame_nr, session.force_idr, ready, error)) {
-    BOOST_LOG(error) << "Native MFT input failed: " << error;
+  std::string status_text;
+  if (!session.submit(frame_nr, session.force_idr, ready, status_text)) {
+    BOOST_LOG(error) << "Native MFT input failed: " << status_text;
     return -1;
   }
   session.last_submitted = frame_nr;
