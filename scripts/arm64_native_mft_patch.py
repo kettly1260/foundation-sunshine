@@ -130,6 +130,75 @@ code = replace_once(
       consume_input_activity();''',
     "video.cpp asynchronous output polling",
 )
+
+# Original capture loop knows only about AMF's asynchronous output. Without
+# including Native MFT pending frames here, it may sleep for the entire next
+# image interval after the hardware encoder has already produced a packet.
+# On static desktops this adds substantial host latency and reduces FPS.
+code = replace_once(
+    code,
+    '''    auto has_amf_output = [&]() {
+      auto amf_session = dynamic_cast<amf_encode_session_t *>(session.get());
+      return amf_session && amf_session->has_pending_output();
+    };
+    auto pop_image_interruptible''',
+    '''    auto has_amf_output = [&]() {
+      auto amf_session = dynamic_cast<amf_encode_session_t *>(session.get());
+      return amf_session && amf_session->has_pending_output();
+    };
+    auto has_pending_async_output = [&]() {
+      if (has_amf_output()) return true;
+#if defined(SUNSHINE_EXPERIMENTAL_NATIVE_MFT)
+      auto native_session = dynamic_cast<native_mft_encode_session_t *>(session.get());
+      if (native_session && native_session->encoder) {
+        return native_session->encoder->pending_count() != 0;
+      }
+#endif
+      return false;
+    };
+    auto pop_image_interruptible''',
+    "video.cpp Native MFT pending-output poll condition",
+)
+code = replace_once(
+    code,
+    '''      if (!has_amf_output() && (!allow_input_preemption || wait_time <= input_activity_poll_interval)) {
+        return images->pop(wait_time);
+      }''',
+    '''      if (!has_pending_async_output() && (!allow_input_preemption || wait_time <= input_activity_poll_interval)) {
+        return images->pop(wait_time);
+      }''',
+    "video.cpp do not block input wait while Native MFT output pending",
+)
+code = replace_once(
+    code,
+    '''        if (collect_amf_outputs(*session, packets, channel_data)) {
+          amf_output_failed = true;
+          return {};
+        }''',
+    '''        if (collect_amf_outputs(*session, packets, channel_data)) {
+          amf_output_failed = true;
+          return {};
+        }
+#if defined(SUNSHINE_EXPERIMENTAL_NATIVE_MFT)
+        if (collect_native_mft_outputs(*session, packets, channel_data)) {
+          BOOST_LOG(error) << "Native MFT output polling failed during capture wait";
+          amf_output_failed = true;
+          return {};
+        }
+#endif''',
+    "video.cpp pump native MFT packets while waiting for next capture",
+)
+code = replace_once(
+    code,
+    '''        if (has_amf_output()) {
+          slice_wait = std::min(slice_wait, amf_output_poll_interval);
+        }''',
+    '''        if (has_pending_async_output()) {
+          // Poll pending Native MFT samples at 1 ms, same cadence as AMF.
+          slice_wait = std::min(slice_wait, amf_output_poll_interval);
+        }''',
+    "video.cpp short-poll interval when native MFT output pending",
+)
 code = replace_once(
     code,
     '''    auto encoder_list = encoders;
