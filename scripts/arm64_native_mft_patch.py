@@ -218,6 +218,15 @@ code = replace_once(
 )
 code = replace_once(
     code,
+    '    auto test_av1 = active_av1_mode >= 2 || (active_av1_mode == 0 && !(encoder.flags & H264_ONLY));',
+    '    auto test_av1 = active_av1_mode >= 2 || (active_av1_mode == 0 && !(encoder.flags & H264_ONLY));\n'
+    '#if defined(SUNSHINE_EXPERIMENTAL_NATIVE_MFT)\n'
+    '    if (encoder.name == "mf_native") test_av1 = false;  // AV1 frozen until valid encoded output\n'
+    '#endif',
+    "video.cpp skip unsupported native MFT AV1 probe",
+)
+code = replace_once(
+    code,
     '''    auto encode_start = std::chrono::steady_clock::now();
     while (!packets->peek()) {
       if (encode(1, session, packets, nullptr, {}, {})) {''',
