@@ -1,3 +1,4 @@
+#define NOMINMAX
 // Native Windows Media Foundation MFT frame-to-packet latency benchmark.
 // Standalone diagnostic; DOES NOT modify or replace Sunshine.
 //
