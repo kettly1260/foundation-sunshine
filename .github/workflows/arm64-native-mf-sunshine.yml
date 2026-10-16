@@ -1,0 +1,240 @@
+name: Foundation Sunshine ARM64 Native MFT experimental
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - src/platform/windows/native_mft_encoder.h
+      - src/platform/windows/native_mft_sunshine.inc
+      - scripts/arm64_native_mft_patch.py
+      - .github/workflows/arm64-native-mf-sunshine.yml
+
+permissions:
+  contents: read
+
+jobs:
+  foundation-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout Foundation source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.longpaths
+          GIT_CONFIG_VALUE_0: 'true'
+
+      - name: Set up MSYS2 CLANGARM64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: clangarm64
+          update: true
+          install: >-
+            git
+            python
+
+      - name: Install native ARM64 build dependencies
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          # Use MSYS2's official repo first; geo-redirected mirrors can stall in CI.
+          sed -i '1iServer = https://repo.msys2.org/mingw/$repo/' /etc/pacman.d/mirrorlist.mingw
+          sed -i '1iServer = https://repo.msys2.org/msys/$arch/' /etc/pacman.d/mirrorlist.msys
+          # Bound downloads and retry transient mirror/network failures.
+          for attempt in 1 2 3; do
+            if timeout 600 pacman --disable-download-timeout -S --needed --noconfirm \
+              mingw-w64-clang-aarch64-toolchain \
+                          mingw-w64-clang-aarch64-cmake \
+                          mingw-w64-clang-aarch64-ninja \
+                          mingw-w64-clang-aarch64-boost \
+                          mingw-w64-clang-aarch64-cppwinrt \
+                          mingw-w64-clang-aarch64-curl-winssl \
+                          mingw-w64-clang-aarch64-miniupnpc \
+                          mingw-w64-clang-aarch64-nlohmann-json \
+                          mingw-w64-clang-aarch64-onevpl \
+                          mingw-w64-clang-aarch64-openssl \
+                          mingw-w64-clang-aarch64-opus \
+                          mingw-w64-clang-aarch64-lld; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "MSYS2 package installation failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 15))"
+          done
+          cmake --version
+          clang++ --version
+
+      - name: Apply experimental Windows ARM64 fixes
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          python scripts/arm64_portable_patch.py
+          python scripts/arm64_native_mft_patch.py
+
+      - name: Set up native Node.js for Web UI
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Build Web UI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build-arm64 | Out-Null
+          $env:SUNSHINE_SOURCE_ASSETS_DIR = "$env:GITHUB_WORKSPACE\src_assets"
+          $env:SUNSHINE_ASSETS_DIR = "$env:GITHUB_WORKSPACE\build-arm64"
+          npm ci
+          npm run build
+
+      - name: Configure ARM64 native program (no driver install)
+        shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
+        run: |
+          set -euxo pipefail
+          command -v npm
+          command -v windres
+          cmake -S . -B build-arm64 -G Ninja \
+            -DCMAKE_RC_COMPILER="$(cygpath -m "$(command -v windres)")" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_ENABLE_TRAY=OFF \
+            -DSUNSHINE_REQUIRE_TRAY=OFF \
+            -DSUNSHINE_RTX_HDR=OFF \
+            -DFETCH_GUI=OFF \
+            -DFETCH_DRIVER_DEPS=OFF \
+            -DDRIVER_DEPS_REQUIRED=OFF
+
+      - name: Build main executable
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          ninja -C build-arm64 sunshine sunshinesvc
+          llvm-readobj --file-headers build-arm64/sunshine.exe | grep -i 'ARM64'
+          llvm-readobj --file-headers build-arm64/tools/sunshinesvc.exe | grep -i 'ARM64'
+
+      - name: Collect native binaries and runtime DLLs
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          stage=dist/Sunshine-Foundation-Windows-ARM64
+          mkdir -p "$stage"
+          cp build-arm64/sunshine.exe "$stage/"
+          # Compile ARM64 SYSTEM service for evaluation only. Never register it here.
+          mkdir -p "$stage/tools"
+          cp build-arm64/tools/sunshinesvc.exe "$stage/tools/"
+          cp -r build-arm64/assets "$stage/"
+          # Inspect the PE import table without executing any DLL code.
+          # 'ldd' can hang on certain Windows DLLs (e.g. libminiupnpc).
+          llvm-readobj --coff-imports build-arm64/sunshine.exe > build-arm64/runtime-imports.txt
+          # Bundle only the native ARM64 MinHook shim. The release archive also
+          # contains x86/x64 variants, which must never enter an ARM64 ZIP.
+          minhook_dll="$(find build-arm64/_deps -type f -name 'minhook-detours.ARM64.Release.dll' -print -quit)"
+          if [[ -z "$minhook_dll" || ! -f "$minhook_dll" ]]; then
+            echo "Missing ARM64 MinHook runtime DLL" >&2
+            exit 1
+          fi
+          cp "$minhook_dll" "$stage/"
+          # Recursively resolve DLL import names against CLANGARM64 runtime.
+          # llvm-readobj is a static PE parser, so no DLL initialization occurs.
+          # System DLLs remain provided by Windows rather than packaged here.
+          for pass in {1..25}; do
+            added=0
+            for binary in "$stage"/*.exe "$stage"/*.dll "$stage"/tools/*.exe "$stage"/tools/*.dll; do
+              [[ -f "$binary" ]] || continue
+              while IFS= read -r name; do
+                [[ -n "$name" ]] || continue
+                [[ -f "$stage/$name" ]] && continue
+                source="/clangarm64/bin/$name"
+                if [[ -f "$source" ]]; then
+                  cp "$source" "$stage/"
+                  echo "Bundled runtime: $name (from ${binary##*/})"
+                  ((added+=1))
+                fi
+              done < <(llvm-readobj --coff-imports "$binary" |
+                awk '/^[[:space:]]*Name:[[:space:]]+/ {print $2}')
+            done
+            echo "Static PE dependency pass $pass: added $added"
+            if ((added == 0)); then break; fi
+            if ((pass == 25)); then
+              echo "Static PE dependency closure did not converge" >&2
+              exit 1
+            fi
+          done
+          # Known missing runtime libraries from the first portable release.
+          for name in zlib1.dll libssh2-1.dll libidn2-0.dll; do
+            source="/clangarm64/bin/$name"
+            if [[ ! -f "$source" ]]; then
+              echo "CLANGARM64 runtime not installed: $source" >&2
+              exit 1
+            fi
+            cp -n "$source" "$stage/"
+          done
+          cat > "$stage/READ-FIRST.txt" <<'TXT'
+          Foundation Sunshine ARM64 Native MFT experiment (H264/HEVC/AV1 SDR NV12)
+          - NOT COMPLETE: no ARM64 virtual display driver or signed installer included.
+          - Do not use install_portable.bat or any driver installation script.
+          - Run sunshine.exe in a normal, unelevated terminal for initial debugging.
+          - tools/sunshinesvc.exe is native ARM64 but NOT installed or validated.
+          - DO NOT register or start this SYSTEM-privileged service from the ZIP.
+          - Native build success alone does not guarantee capture or encoding functionality.
+          - To opt in, set encoder = mf_native in the Sunshine configuration; default FFmpeg remains available.
+          - Native MFT is SDR 8-bit NV12 only. HDR and YUV444 are disabled pending separate testing.
+          - AV1 packetization/decoder compatibility and Moonlight playback must be tested on the host.
+          - REQUIRED before acceptance: H.264 AND HEVC confirmed with Moonlight; ARM64 virtual display installed separately.
+          - For experimental software HEVC, set hevc_mode = 2 in Sunshine configuration.
+          - Do not use an x64 ZakoVDD driver; do not weaken Secure Boot for testing.
+          - Keep existing Sunshine installations unchanged until runtime validation.
+          TXT
+
+      - name: Reject non-ARM64 PE files
+        shell: pwsh
+        run: python scripts/check-arm64-pe.py dist/Sunshine-Foundation-Windows-ARM64
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/Sunshine-Foundation-Windows-ARM64' -DestinationPath 'dist/Sunshine-Foundation-Windows-ARM64-experimental.zip' -Force
+
+      - name: Smoke-test extracted ARM64 ZIP with system-only DLL PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP 'foundation-arm64-smoke'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Expand-Archive -LiteralPath 'dist/Sunshine-Foundation-Windows-ARM64-experimental.zip' -DestinationPath $destination -Force
+          $stage = Join-Path $destination 'Sunshine-Foundation-Windows-ARM64'
+          $exe = Join-Path $stage 'sunshine.exe'
+          if (!(Test-Path -LiteralPath $exe)) { throw 'The portable ZIP is missing sunshine.exe' }
+          $serviceExe = Join-Path $stage 'tools\sunshinesvc.exe'
+          if (!(Test-Path -LiteralPath $serviceExe)) { throw 'The portable ZIP is missing ARM64 tools/sunshinesvc.exe' }
+          foreach ($name in @('zlib1.dll','libssh2-1.dll','libidn2-0.dll','minhook-detours.ARM64.Release.dll')) {
+            if (!(Test-Path -LiteralPath (Join-Path $stage $name))) { throw "Missing packaged DLL: $name" }
+          }
+          # Do not allow DLLs installed on the CI runner to mask packaging bugs.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $stage -NoNewWindow -PassThru -ErrorAction Stop
+          if (!$proc.WaitForExit(30000)) {
+            $proc.Kill()
+            throw 'sunshine.exe --version timed out'
+          }
+          $proc.Refresh()
+          if ($proc.ExitCode -ne 0) {
+            throw "sunshine.exe --version failed with code $($proc.ExitCode)"
+          }
+          Write-Host 'PASS: extracted ARM64 portable ZIP starts with a system-only DLL search path.'
+
+      - name: Upload portable experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundation-arm64-NATIVE-MFT-EXPERIMENTAL-not-validated
+          path: dist/Sunshine-Foundation-Windows-ARM64-experimental.zip
+          if-no-files-found: error
