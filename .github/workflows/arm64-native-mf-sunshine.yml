@@ -9,6 +9,10 @@ on:
       - src/platform/windows/native_mft_encoder.h
       - src/platform/windows/native_mft_sunshine.inc
       - scripts/arm64_native_mft_patch.py
+      - scripts/arm64_upstream_perf_patch.py
+      - tools/native-mf/perf_recorder.cpp
+      - tools/native-mf/perf_recorder.h
+      - tools/native-mf/frame_rate_tracker.h
       - .github/workflows/arm64-native-mf-sunshine.yml
 
 permissions:
@@ -76,6 +80,7 @@ jobs:
           set -euxo pipefail
           python scripts/arm64_portable_patch.py
           python scripts/arm64_native_mft_patch.py
+          python scripts/arm64_upstream_perf_patch.py
 
       - name: Set up native Node.js for Web UI
         uses: actions/setup-node@v4
