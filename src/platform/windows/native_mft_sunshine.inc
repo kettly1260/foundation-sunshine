@@ -152,6 +152,10 @@ int collect_native_mft_outputs(
     BOOST_LOG(error) << "Native MFT output failed: " << status_text;
     return -1;
   }
+  if (const auto dropped = native->encoder->take_empty_output_count()) {
+    BOOST_LOG(warning) << "Native MFT returned " << dropped
+                       << " zero-byte encoded sample(s); skipped empty packets without restarting encoder";
+  }
   return emit_native_mft_packets(*native, ready, packets, channel_data);
 }
 
