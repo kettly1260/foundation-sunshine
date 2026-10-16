@@ -61,8 +61,8 @@ std::unique_ptr<native_mft_encode_session_t>
 make_native_mft_encode_session(const config_t &config,
                                std::unique_ptr<platf::avcodec_encode_device_t> converter) {
   if (!converter || !converter->data || config.dynamicRange ||
-      config.chromaSamplingType || config.videoFormat < 0 || config.videoFormat > 2) {
-    BOOST_LOG(warning) << "Native MFT currently supports only SDR 8-bit NV12 for H.264, HEVC and AV1";
+      config.chromaSamplingType || config.videoFormat < 0 || config.videoFormat > 1) {
+    BOOST_LOG(warning) << "Native MFT currently supports SDR 8-bit NV12 H.264/HEVC only (AV1 deferred)";
     return nullptr;
   }
 
@@ -109,7 +109,10 @@ make_native_mft_encode_session(const config_t &config,
     return nullptr;
   }
   BOOST_LOG(info) << "Native MFT hardware encoder active for "
-                  << (config.videoFormat == 0 ? "H.264" : config.videoFormat == 1 ? "HEVC" : "AV1");
+                  << (config.videoFormat == 0 ? "H.264" : "HEVC");
+  if (encoder->qualcomm_cfr_active()) {
+    BOOST_LOG(info) << "Native MFT Qualcomm CameraRecord CFR enabled (upstream frame-drop workaround)";
+  }
   return std::make_unique<native_mft_encode_session_t>(
     std::move(converter), std::move(hw_device), std::move(hw_frames), std::move(encoder));
 }
@@ -152,9 +155,22 @@ int collect_native_mft_outputs(
     BOOST_LOG(error) << "Native MFT output failed: " << status_text;
     return -1;
   }
-  if (const auto dropped = native->encoder->take_empty_output_count()) {
-    BOOST_LOG(warning) << "Native MFT returned " << dropped
-                       << " zero-byte encoded sample(s); skipped empty packets without restarting encoder";
+  if (auto diag = native->encoder->take_empty_output_diagnostics()) {
+    BOOST_LOG(warning) << "Native MFT empty-output diagnostics (1s window): "
+                       << "empty=" << diag->skipped_since_last
+                       << ", valid=" << diag->encoded_since_last
+                       << ", empty_total=" << diag->skipped_total
+                       << ", valid_total=" << diag->encoded_total
+                       << ", stream_flags=" << diag->output_stream_flags
+                       << ", output_status=" << diag->output_status
+                       << ", process_status=" << diag->process_status
+                       << ", buffers=" << diag->sample_buffer_count
+                       << ", sample_total_len=" << diag->sample_total_length
+                       << ", max_buffer_len=" << diag->sample_buffer_capacity
+                       << ", sample_flags=" << diag->sample_flags
+                       << ", frame_index=" << diag->frame_index
+                       << ", keyframe_requested=" << diag->requested_keyframe
+                       << ", mft_owned=" << diag->output_mft_owned;
   }
   return emit_native_mft_packets(*native, ready, packets, channel_data);
 }
