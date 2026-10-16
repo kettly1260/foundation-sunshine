@@ -255,7 +255,8 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
 
-      if (idr && codec_api_) {
+      const bool request_keyframe = idr || retry_keyframe_after_empty_;
+      if (request_keyframe && codec_api_) {
         VARIANT v{}; v.vt=VT_UI4; v.ulVal=1;
         // Some drivers reject force-keyframe; that is NOT a valid stream
         // for a Moonlight recovery request. Reject instead of lying.
@@ -283,8 +284,9 @@ public:
       check(sample->SetSampleDuration((10000000LL * fps_d_) / fps_n_), "SetSampleDuration");
       check(transform_->ProcessInput(input_id_,sample.Get(),0), "MFT ProcessInput");
       slot.busy = true;
-      pending_.emplace(pts, pending_t {frame_index,slot_index});
+      pending_.emplace(pts, pending_t {frame_index,slot_index,request_keyframe});
       --input_requests_;
+      retry_keyframe_after_empty_ = false;
       return true;
     } catch (const std::exception &e) {
       error = e.what();
@@ -293,6 +295,11 @@ public:
   }
 
   size_t pending_count() const { return pending_.size(); }
+  // Count only samples already consumed from ProcessOutput. Reporting is done
+  // by Sunshine, rather than requiring its logging dependencies in this header.
+  size_t take_empty_output_count() {
+    return std::exchange(empty_output_count_since_report_, size_t {0});
+  }
 
 private:
   struct slot_t {
@@ -302,6 +309,7 @@ private:
   struct pending_t {
     std::int64_t index;
     size_t slot;
+    bool requested_keyframe;
   };
 
   static void check(HRESULT hr, const char *operation) {
@@ -375,8 +383,32 @@ private:
     check(sample->ConvertToContiguousBuffer(&contiguous),"MFT encoded buffer");
     DWORD length=0;
     check(contiguous->GetCurrentLength(&length),"MFT encoded buffer length");
-    if (length==0 || length>16*1024*1024)
-      throw std::runtime_error("MFT encoded output empty or too large");
+    if (length == 0) {
+      // The Qualcomm encoder can return a successful output sample containing
+      // no coded bytes. This represents no packet to transmit, not a valid
+      // bitstream packet. Release the corresponding input texture, count the
+      // skipped frame, and preserve the rest of the running stream instead of
+      // tearing the MFT down and interrupting Moonlight.
+      ++empty_output_count_since_report_;
+      if (++consecutive_empty_outputs_ >= 8) {
+        throw std::runtime_error(
+          "MFT returned at least 8 consecutive zero-byte encoded samples");
+      }
+      if (it->second.requested_keyframe) {
+        // Never silently lose an explicitly requested recovery keyframe.
+        retry_keyframe_after_empty_ = true;
+      }
+      slots_[it->second.slot].busy=false;
+      pending_.erase(it);
+      return;
+    }
+    consecutive_empty_outputs_ = 0;
+    if (length > 16*1024*1024) {
+      throw std::runtime_error("MFT encoded output exceeds 16 MiB: length=" +
+                               std::to_string(length) +
+                               ", output_status=" + std::to_string(out.dwStatus) +
+                               ", process_status=" + std::to_string(status));
+    }
     BYTE *data=nullptr;
     check(contiguous->Lock(&data,nullptr,nullptr),"MFT encoded buffer lock");
     encoded_frame_t packet;
@@ -402,6 +434,9 @@ private:
   bool output_provided_=false;
   DWORD input_id_=0,output_id_=0;
   unsigned input_requests_=0;
+  size_t empty_output_count_since_report_=0;
+  unsigned consecutive_empty_outputs_=0;
+  bool retry_keyframe_after_empty_=false;
   std::array<slot_t,12> slots_ {};
   std::map<LONGLONG,pending_t> pending_;
 };
