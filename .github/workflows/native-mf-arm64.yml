@@ -28,6 +28,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Capability probe compilation failed' }
           cl /nologo /EHsc /std:c++17 /W4 /Fe:dist/native_mft_benchmark.exe tools/native-mf/native_mft_benchmark.cpp /link mfplat.lib mf.lib mfuuid.lib ole32.lib oleaut32.lib d3d11.lib dxgi.lib
           if ($LASTEXITCODE -ne 0) { throw 'Encode benchmark compilation failed' }
+          cl /nologo /EHsc /std:c++17 /W4 /Fe:dist/native_mft_av1_benchmark.exe tools/native-mf/native_mft_av1_benchmark.cpp /link mfplat.lib mf.lib mfuuid.lib ole32.lib oleaut32.lib d3d11.lib dxgi.lib
+          if ($LASTEXITCODE -ne 0) { throw 'AV1 encode benchmark compilation failed' }
       - name: Verify native MFT backend header against ARM64 Windows SDK
         shell: pwsh
         run: |
@@ -40,6 +42,14 @@ jobs:
           '@ | Set-Content -Path dist/native_mft_header_smoke.cpp -Encoding utf8
           cl /nologo /EHsc /std:c++17 /W4 /c /Fodist/native_mft_header_smoke.obj dist/native_mft_header_smoke.cpp
           if ($LASTEXITCODE -ne 0) { throw 'Native MFT header cannot compile on Windows ARM64 SDK' }
+      - name: Validate ARM64 experimental integration anchors
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/arm64_native_mft_patch.py
+          python scripts/arm64_portable_patch.py
+          if ($LASTEXITCODE -ne 0) { throw 'ARM64 portable bootstrap failed' }
+          python scripts/arm64_native_mft_patch.py
+          if ($LASTEXITCODE -ne 0) { throw 'Native MFT integration patch anchors failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: native-mf-arm64-tools
