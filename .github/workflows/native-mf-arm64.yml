@@ -7,6 +7,8 @@ on:
     paths:
       - tools/native-mf/**
       - .github/workflows/native-mf-arm64.yml
+      - src/platform/windows/native_mft_encoder.h
+      - src/platform/windows/native_mft_sunshine.inc
 permissions:
   contents: read
 jobs:
@@ -26,6 +28,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Capability probe compilation failed' }
           cl /nologo /EHsc /std:c++17 /W4 /Fe:dist/native_mft_benchmark.exe tools/native-mf/native_mft_benchmark.cpp /link mfplat.lib mf.lib mfuuid.lib ole32.lib oleaut32.lib d3d11.lib dxgi.lib
           if ($LASTEXITCODE -ne 0) { throw 'Encode benchmark compilation failed' }
+      - name: Verify native MFT backend header against ARM64 Windows SDK
+        shell: pwsh
+        run: |
+          @'
+          #include "../src/platform/windows/native_mft_encoder.h"
+          int main() {
+            auto codec = video::native_mft::codec_e::av1;
+            return codec == video::native_mft::codec_e::av1 ? 0 : 1;
+          }
+          '@ | Set-Content -Path dist/native_mft_header_smoke.cpp -Encoding utf8
+          cl /nologo /EHsc /std:c++17 /W4 /c /Fodist/native_mft_header_smoke.obj dist/native_mft_header_smoke.cpp
+          if ($LASTEXITCODE -ne 0) { throw 'Native MFT header cannot compile on Windows ARM64 SDK' }
       - uses: actions/upload-artifact@v4
         with:
           name: native-mf-arm64-tools
