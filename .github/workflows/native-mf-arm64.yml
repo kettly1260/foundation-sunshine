@@ -9,6 +9,7 @@ on:
       - .github/workflows/native-mf-arm64.yml
       - src/platform/windows/native_mft_encoder.h
       - src/platform/windows/native_mft_sunshine.inc
+      - scripts/arm64_native_mft_patch.py
 permissions:
   contents: read
 jobs:
