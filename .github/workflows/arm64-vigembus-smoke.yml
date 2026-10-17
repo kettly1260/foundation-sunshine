@@ -56,23 +56,39 @@ jobs:
           $machine = [BitConverter]::ToUInt16($bytes,$offset+4)
           Write-Host ("Installed ViGEmBus driver machine = 0x{0:X4}" -f $machine)
           if ($machine -ne 0xAA64) { throw "Installed ViGEmBus is not native ARM64" }
-          $devices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-            Where-Object { $_.FriendlyName -match "ViGEm" -or $_.InstanceId -match "ViGEm" })
-          if (!$devices -or !($devices | Where-Object { $_.Status -eq 'OK' })) {
-            throw "ViGEmBus PnP device not present and OK after install"
+          Write-Host "Service status from SCM:"
+          sc.exe query ViGEmBus
+          Write-Host "Driver information from CIM:"
+          Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)vigem' -or $_.DisplayName -match '(?i)vigem|virtual gamepad' } |
+            Format-List Name,DisplayName,State,Started,StartMode,PathName
+          Write-Host "Device IDs before and after PnP rescan:"
+          for ($try = 0; $try -lt 3; $try++) {
+            $devices = @(Get-PnpDevice -ErrorAction SilentlyContinue |
+              Where-Object { $_.FriendlyName -match '(?i)ViGEm|Virtual Gamepad|Nefarius' -or $_.InstanceId -match '(?i)ViGEm|Nefarius' })
+            $present = @($devices | Where-Object { $_.Status -eq 'OK' })
+            $devices | Format-Table FriendlyName,Status,InstanceId -AutoSize
+            if ($present.Count -gt 0) { break }
+            if ($try -eq 0) { pnputil.exe /scan-devices }
+            Start-Sleep -Seconds 3
           }
           $report = [ordered]@{
             os = "Windows ARM64"
             installed_driver_architecture = "ARM64"
             pnp_devices = @($devices | Select-Object FriendlyName,Status,InstanceId)
+            pnp_device_present_and_ok = ($present.Count -gt 0)
             driver_signature_status = $sig.Status.ToString()
-            hardware_test = "ViGEmBus bus installed; functional X360/DS4 client emulation not yet verified"
+            hardware_test = "Driver file verified; bus PnP state reported separately; X360/DS4 emulation not yet verified"
             run_location = "disposable GitHub ARM64 CI runner; not the user's host"
           }
           $report | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\vigem-arm64-smoke.json"
+          if ($present.Count -eq 0) {
+            throw "Signed ARM64 ViGEmBus.sys is installed, but there is no OK PnP bus after rescan; inspect evidence"
+          }
           Write-Host "ViGEmBus native ARM64 PnP load verified successfully"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: arm64-vigembus-driver-smoke-evidence
           path: ${{ runner.temp }}/vigem-arm64-smoke.json
-          if-no-files-found: error
+          if-no-files-found: warn
