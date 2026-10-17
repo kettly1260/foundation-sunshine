@@ -1,0 +1,208 @@
+name: Sunshine ARM64 native desktop GUI
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_run_id:
+        description: "Successful Native MFT ARM64 core build run ID to pair with the GUI"
+        required: true
+        default: "38897697336"
+        type: string
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - .github/workflows/arm64-native-gui.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gui-arm64:
+    name: Build native ARM64 Tauri GUI
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout pinned Foundation GUI source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Initialize only the pinned GUI submodule
+        shell: pwsh
+        run: |
+          git -c core.longpaths=true submodule update --init src_assets/common/sunshine-control-panel
+          if ($LASTEXITCODE -ne 0) { throw "Unable to checkout the pinned GUI submodule" }
+          $gui = "src_assets/common/sunshine-control-panel"
+          $expected = ((git ls-tree HEAD $gui) -split "\s+")[2]
+          $actual = (git -C $gui rev-parse HEAD).Trim()
+          if ($expected -ne $actual) { throw "GUI gitlink mismatch: $expected vs $actual" }
+          "GUI_SUBMODULE_SHA=$actual" >> $env:GITHUB_ENV
+          Write-Host "Building pinned GUI revision $actual (not upstream HEAD)"
+
+      - name: Configure Visual Studio native ARM64 toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Setup ARM64 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Setup Rust aarch64-pc-windows-msvc
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Verify ARM64 toolchain
+        shell: pwsh
+        run: |
+          Write-Host "OS architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne "Arm64") {
+            throw "Refusing to build on a non-ARM64 runner"
+          }
+          rustc -vV
+          cargo --version
+          node --version
+          where.exe cl
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio ARM64 compiler unavailable" }
+
+      - name: Install pinned GUI npm dependencies
+        working-directory: src_assets/common/sunshine-control-panel
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+
+      - name: Build GUI renderer and run frontend tests
+        working-directory: src_assets/common/sunshine-control-panel
+        shell: pwsh
+        run: |
+          npm run build:renderer
+          if ($LASTEXITCODE -ne 0) { throw "GUI Vite renderer build failed" }
+          npm run test:renderer
+          if ($LASTEXITCODE -ne 0) { throw "GUI renderer tests failed" }
+
+      - name: Build ARM64 native stylus plugin
+        working-directory: src_assets/common/sunshine-control-panel
+        shell: pwsh
+        run: |
+          ./scripts/build-native-plugins.ps1 -Configuration Release -Target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 stylus plugin build failed" }
+
+      - name: Build native ARM64 Tauri executable
+        working-directory: src_assets/common/sunshine-control-panel
+        shell: pwsh
+        run: |
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --release --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Native ARM64 Tauri compilation failed" }
+
+      - name: Package GUI executable and matching native plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gui = "src_assets/common/sunshine-control-panel"
+          $dir = Join-Path $gui "src-tauri/target/aarch64-pc-windows-msvc/release"
+          foreach ($file in @("sunshine-gui.exe","alkaidlab-plugin-stylus.dll")) {
+            if (!(Test-Path -LiteralPath (Join-Path $dir $file))) {
+              throw "Required ARM64 GUI component missing: $file"
+            }
+          }
+          New-Item -ItemType Directory -Force dist/gui/pe-check | Out-Null
+          Copy-Item (Join-Path $dir "sunshine-gui.exe") dist/gui/pe-check/
+          Copy-Item (Join-Path $dir "alkaidlab-plugin-stylus.dll") dist/gui/pe-check/
+          if (Test-Path (Join-Path $dir "WebView2Loader.dll")) {
+            Copy-Item (Join-Path $dir "WebView2Loader.dll") dist/gui/pe-check/
+          }
+          python scripts/check-arm64-pe.py dist/gui/pe-check
+          if ($LASTEXITCODE -ne 0) { throw "Non-ARM64 GUI or plugin binary found" }
+          Remove-Item dist/gui/pe-check -Recurse -Force
+          & (Join-Path $gui "scripts/package-gui-bundle.ps1") -SourceDirectory $dir -OutputPath "dist/gui/sunshine-gui-windows-arm64.zip"
+          $sha = $env:GUI_SUBMODULE_SHA
+          "GUI Source: qiin2333/sunshine-control-panel@$sha" | Set-Content dist/gui/BUILD-MANIFEST.txt
+          "Target: aarch64-pc-windows-msvc; Tauri GUI + matching stylus DLL" | Add-Content dist/gui/BUILD-MANIFEST.txt
+          "Not a signed installer; no driver/service registration was performed." | Add-Content dist/gui/BUILD-MANIFEST.txt
+          Get-FileHash (Join-Path $dir "sunshine-gui.exe") -Algorithm SHA256 | Format-List
+
+      - name: Upload portable ARM64 GUI bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunshine-gui-windows-arm64
+          path: dist/gui/*
+          if-no-files-found: error
+          retention-days: 14
+
+  combine-arm64:
+    name: Pair tested core ZIP with native GUI
+    needs: gui-arm64
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Download matching GUI from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: sunshine-gui-windows-arm64
+          path: gui-artifact
+
+      - name: Download known-good experimental Native MFT core ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: foundation-arm64-NATIVE-MFT-EXPERIMENTAL-not-validated
+          path: core-artifact
+          repository: kettly1260/foundation-sunshine
+          run-id: "${{ github.event.inputs.core_run_id || '38897697336' }}"
+          github-token: "${{ github.token }}"
+
+      - name: Assemble completely native ARM64 portable Sunshine + desktop GUI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $core = Get-ChildItem -LiteralPath core-artifact -Filter "*.zip" -File
+          if ($core.Count -ne 1) { throw "Expected exactly one native core archive" }
+          $guiZip = Join-Path (Resolve-Path gui-artifact).Path "sunshine-gui-windows-arm64.zip"
+          if (!(Test-Path -LiteralPath $guiZip)) { throw "GUI artifact archive not found" }
+          $dest = "combined"
+          Expand-Archive -LiteralPath $core[0].FullName -DestinationPath $dest
+          $stage = Join-Path $dest "Sunshine-Foundation-Windows-ARM64"
+          if (!(Test-Path -LiteralPath (Join-Path $stage "sunshine.exe"))) {
+            throw "Core archive lacks expected ARM64 sunshine.exe"
+          }
+          $guiDir = Join-Path $stage "assets/gui"
+          New-Item -ItemType Directory -Force -Path $guiDir | Out-Null
+          Expand-Archive -LiteralPath $guiZip -DestinationPath $guiDir
+          foreach ($f in @("sunshine-gui.exe","alkaidlab-plugin-stylus.dll")) {
+            if (!(Test-Path -LiteralPath (Join-Path $guiDir $f))) {
+              throw "GUI bundle missing: $f"
+            }
+          }
+          python scripts/check-arm64-pe.py $stage
+          if ($LASTEXITCODE -ne 0) { throw "Combined archive includes non-ARM64 PE binaries" }
+          @'
+          Sunshine Foundation Windows ARM64 - Native GUI experimental
+          - GUI executable: assets/gui/sunshine-gui.exe
+          - GUI Stylus DLL: assets/gui/alkaidlab-plugin-stylus.dll
+          - Sunshine core executable: sunshine.exe
+          - GUI is bundled under assets/gui so it can resolve the portable Sunshine root.
+          - Start sunshine.exe first from this folder; then launch assets/gui/sunshine-gui.exe.
+          - Keep the previously working Sunshine folder and do not run installers here.
+          - Do not run or register tools/sunshinesvc.exe or install any x64 display driver.
+          - WebView2 runtime must be available on Windows ARM64.
+          - Native binaries have passed PE architecture checks; GUI startup and tray still need a device test.
+          - Native video encoder: set encoder = mf_native (H264/HEVC SDR); AV1 deferred.
+          '@ | Set-Content -LiteralPath (Join-Path $stage "ARM64-GUI-READ-FIRST.txt") -Encoding UTF8
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path $stage -DestinationPath "dist/Sunshine-Foundation-Windows-ARM64-with-native-GUI.zip"
+          if (!(Test-Path "dist/Sunshine-Foundation-Windows-ARM64-with-native-GUI.zip")) {
+            throw "Combined portable archive not created"
+          }
+
+      - name: Upload complete native ARM64 portable Sunshine + GUI
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundation-arm64-native-gui-portable-experimental
+          path: dist/Sunshine-Foundation-Windows-ARM64-with-native-GUI.zip
+          if-no-files-found: error
+          retention-days: 14
