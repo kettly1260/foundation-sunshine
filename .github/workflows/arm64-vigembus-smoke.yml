@@ -7,6 +7,7 @@ on:
       - experiment/native-mf-arm64
     paths:
       - .github/workflows/arm64-vigembus-smoke.yml
+      - tools/native-mf/arm64_vigem_client_smoke.cpp
 
 permissions:
   contents: read
@@ -86,6 +87,38 @@ jobs:
             throw "Signed ARM64 ViGEmBus.sys is installed, but there is no OK PnP bus after rescan; inspect evidence"
           }
           Write-Host "ViGEmBus native ARM64 PnP load verified successfully"
+      - name: Checkout pinned Sunshine ViGEmClient SDK
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Initialize only the pinned ViGEmClient SDK
+        shell: pwsh
+        run: |
+          git -c core.longpaths=true submodule update --init third-party/ViGEmClient
+          if ($LASTEXITCODE -ne 0) { throw "ViGEmClient submodule checkout failed" }
+          $sha = (git -C third-party/ViGEmClient rev-parse HEAD).Trim()
+          if ($sha -ne "8d71f6740ffff4671cdadbca255ce528e3cd3fef") {
+            throw "Unexpected pinned Sunshine ViGEmClient source: $sha"
+          }
+      - name: Setup native ARM64 C++ compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+      - name: Build and run X360 / DS4 native client smoke
+        shell: pwsh
+        run: |
+          cmake -S third-party/ViGEmClient -B "$env:RUNNER_TEMP/vigemclient-build" -G "Visual Studio 17 2022" -A ARM64
+          if ($LASTEXITCODE -ne 0) { throw "ViGEmClient ARM64 CMake configuration failed" }
+          cmake --build "$env:RUNNER_TEMP/vigemclient-build" --config Release --target ViGEmClient --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "ViGEmClient ARM64 build failed" }
+          $lib = Get-ChildItem "$env:RUNNER_TEMP/vigemclient-build" -Recurse -Filter "ViGEmClient.lib" -File |
+            Select-Object -First 1
+          if (!$lib) { throw "ViGEmClient ARM64 static library not found" }
+          cl /nologo /EHsc /std:c++17 /Ithird-party/ViGEmClient/include tools/native-mf/arm64_vigem_client_smoke.cpp $lib.FullName setupapi.lib /link /out:"$env:RUNNER_TEMP/vigem_smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "ViGEmClient ARM64 smoke build failed" }
+          & "$env:RUNNER_TEMP/vigem_smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Native X360/DS4 controller attach/remove smoke failed" }
+          Write-Host "Functional ARM64 gamepad virtual target attach/remove verified"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
