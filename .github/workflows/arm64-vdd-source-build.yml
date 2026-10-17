@@ -1,0 +1,110 @@
+name: Windows ARM64 ZakoVDD source portability experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - scripts/arm64_vdd_project_port.py
+      - .github/workflows/arm64-vdd-source-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-idddcx:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          repository: qiin2333/zako-vdd
+          ref: 88d117431549bcba22fea27ded3d4804c79b51fb
+          path: vdd-source
+          submodules: false
+      - name: Verify pinned upstream source and add experimental ARM64 platform
+        shell: pwsh
+        run: |
+          $actual = (git -C vdd-source rev-parse HEAD).Trim()
+          if ($actual -ne "88d117431549bcba22fea27ded3d4804c79b51fb") {
+            throw "Unexpected upstream ZakoVDD source commit: $actual"
+          }
+          python scripts/arm64_vdd_project_port.py vdd-source/ZakoVDD/ZakoVDD.vcxproj
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 project conversion failed" }
+          Write-Host "Pinned ZakoVDD v0.17.5 source: $actual"
+
+      - name: Configure Visual Studio 2022 MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
+
+      - name: Install Windows Driver Kit if missing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tasks = Get-ChildItem "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.17.0.dll" -ErrorAction SilentlyContinue
+          $wdf = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -ErrorAction SilentlyContinue
+          if (!$tasks -or !$wdf) {
+            Write-Host "Installing official WDK in ephemeral CI machine; NEVER on the user PC"
+            $setup = "$env:TEMP\wdksetup.exe"
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2272234" -OutFile $setup -UseBasicParsing
+            $p = Start-Process -FilePath $setup -ArgumentList "/quiet","/norestart","/features","+" -Wait -NoNewWindow -PassThru
+            if ($p.ExitCode -ne 0) { throw "WDK installer failed: $($p.ExitCode)" }
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -products * -requires Microsoft.Component.MSBuild -version "[17.0,18.0)" -property installationPath -latest
+          if (!$installation) { throw "Visual Studio 2022 with MSBuild not found" }
+          $vsixInstaller = Join-Path $installation "Common7\IDE\VSIXInstaller.exe"
+          $vsix = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$vsix) { throw "WDK VS integration VSIX not found" }
+          $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
+          Write-Host "WDK VSIX install exit code $($p.ExitCode)"
+          $tasks = Get-ChildItem "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.17.0.dll" -ErrorAction SilentlyContinue
+          if (!$tasks) { throw "WDK MSBuild tasks still missing after installation" }
+
+      - name: Build unsigned ARM64 IddCx / UMDF ZakoVDD driver
+        shell: pwsh
+        run: |
+          msbuild vdd-source/ZakoVDD/ZakoVDD.vcxproj /m /p:Configuration=Release /p:Platform=ARM64 /p:SignMode=Off /p:EnableCodeAnalysis=false /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "ZakoVDD ARM64 compilation or linking failed" }
+
+      - name: Verify PE ARM64 and stage unsigned build evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = Get-ChildItem vdd-source -Recurse -Filter ZakoVDD.dll -File |
+            Where-Object { $_.FullName -match '(?i)arm64' } | Select-Object -First 1
+          if (!$dll) { throw "ARM64 ZakoVDD.dll output not found" }
+          $inf = Get-ChildItem vdd-source -Recurse -Filter ZakoVDD.inf -File |
+            Where-Object { $_.FullName -match '(?i)arm64' } | Select-Object -First 1
+          if (!$inf) { throw "Stamped ARM64 driver INF not found" }
+          python -c "import struct,sys; d=open(sys.argv[1],'rb').read();o=struct.unpack_from('<I',d,60)[0];m=struct.unpack_from('<H',d,o+4)[0];print('ZakoVDD PE machine',hex(m));sys.exit(0 if m==0xaa64 else 1)" $dll.FullName
+          if ($LASTEXITCODE -ne 0) { throw "ZakoVDD output is not native Windows ARM64" }
+          $text = Get-Content -LiteralPath $inf.FullName -Raw
+          if ($text -match '\$ARCH\$' -or $text -match '\$UMDFVERSION\$' -or $text -notmatch 'NTarm64') {
+            throw "ARM64 INF not stamped for target architecture"
+          }
+          New-Item -Force -ItemType Directory arm64-vdd-unsigned | Out-Null
+          Copy-Item -LiteralPath $dll.FullName -Destination arm64-vdd-unsigned/
+          Copy-Item -LiteralPath $inf.FullName -Destination arm64-vdd-unsigned/
+          @'
+          UNSIGNED DEVELOPMENT OUTPUT, NOT AN INSTALLABLE RELEASE
+          Upstream: qiin2333/zako-vdd v0.17.5, commit 88d117431549bcba22fea27ded3d4804c79b51fb
+          Target: ARM64 / UMDF 2 / IddCx
+          NO signed catalog is included.
+          DO NOT install on a production machine, do NOT disable Secure Boot, do NOT enable test signing.
+          Next stages: production driver signing, clean-VM PnP tests, control IOCTL compatibility, streaming.
+          '@ | Set-Content -LiteralPath arm64-vdd-unsigned/READ-FIRST.txt
+          Write-Host "Built native ARM64 VDD driver in isolated GitHub CI; installation not attempted"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zako-vdd-arm64-UNSIGNED-development-only
+          path: arm64-vdd-unsigned/*
+          if-no-files-found: error
+          retention-days: 7
