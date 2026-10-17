@@ -1,0 +1,73 @@
+name: ARM64 ViGEmBus signed-driver smoke (disposable CI only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-signed-vigembus:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    steps:
+      - name: Verify Windows ARM64 disposable runner
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($arch -ne "Arm64") { throw "Refusing to install driver outside Windows ARM64 test runner" }
+          Write-Host "Using disposable GitHub-hosted ARM64 runner; this does NOT access the user's PC"
+      - name: Download pinned official ViGEmBus 1.22.0 and verify SHA256 and signature
+        shell: pwsh
+        run: |
+          $url = "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe"
+          $path = Join-Path $env:RUNNER_TEMP "ViGEmBus_1.22.0_x64_x86_arm64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $path -UseBasicParsing
+          $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a"
+          if ($hash -ne $expected) { throw "ViGEmBus checksum mismatch" }
+          $sig = Get-AuthenticodeSignature -LiteralPath $path
+          if ($sig.Status.ToString() -ne "Valid") { throw "ViGEmBus vendor installer Authenticode verification failed: $($sig.Status)" }
+          "VIGEM_INSTALLER=$path" >> $env:GITHUB_ENV
+          Write-Host "Verified signed ViGEmBus multiarch installer; publisher $($sig.SignerCertificate.Subject)"
+      - name: Install ViGEmBus only inside ephemeral runner
+        shell: pwsh
+        run: |
+          # No test certificates, no bcdedit, no Secure Boot changes.
+          $p = Start-Process -FilePath $env:VIGEM_INSTALLER -ArgumentList "/quiet", "/norestart" -Wait -NoNewWindow -PassThru
+          Write-Host "ViGEmBus installer exit code: $($p.ExitCode)"
+          if ($p.ExitCode -notin @(0,3010,1641)) { throw "ViGEmBus install error $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) { throw "ViGEmBus requires reboot; this CI does not force reboot" }
+      - name: Validate installed ARM64 bus-driver PE and PnP device
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sys = Join-Path $env:windir "System32\drivers\ViGEmBus.sys"
+          if (!(Test-Path -LiteralPath $sys)) { throw "ViGEmBus.sys not installed" }
+          $sig = Get-AuthenticodeSignature -LiteralPath $sys
+          if ($sig.Status.ToString() -ne "Valid") { throw "Installed ViGEmBus.sys signature invalid: $($sig.Status)" }
+          $bytes = [System.IO.File]::ReadAllBytes($sys)
+          $offset = [BitConverter]::ToInt32($bytes,0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes,$offset+4)
+          Write-Host ("Installed ViGEmBus driver machine = 0x{0:X4}" -f $machine)
+          if ($machine -ne 0xAA64) { throw "Installed ViGEmBus is not native ARM64" }
+          $devices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -match "ViGEm" -or $_.InstanceId -match "ViGEm" })
+          if (!$devices -or !($devices | Where-Object { $_.Status -eq 'OK' })) {
+            throw "ViGEmBus PnP device not present and OK after install"
+          }
+          $report = [ordered]@{
+            os = "Windows ARM64"
+            installed_driver_architecture = "ARM64"
+            pnp_devices = @($devices | Select-Object FriendlyName,Status,InstanceId)
+            driver_signature_status = $sig.Status.ToString()
+            hardware_test = "ViGEmBus bus installed; functional X360/DS4 client emulation not yet verified"
+            run_location = "disposable GitHub ARM64 CI runner; not the user's host"
+          }
+          $report | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\vigem-arm64-smoke.json"
+          Write-Host "ViGEmBus native ARM64 PnP load verified successfully"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-vigembus-driver-smoke-evidence
+          path: ${{ runner.temp }}/vigem-arm64-smoke.json
+          if-no-files-found: error
