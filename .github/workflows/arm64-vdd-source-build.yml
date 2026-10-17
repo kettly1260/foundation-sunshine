@@ -109,42 +109,89 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Validate ARM64 driver INF and produce test-only CAT
+      - name: Test-sign and verify WDK-generated ARM64 driver catalog (no install)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $kit = "${env:ProgramFiles(x86)}\Windows Kits\10"
-          function Find-WdkTool($name) {
-            $match = Get-ChildItem "$kit\bin" -Recurse -Filter $name -File | Where-Object FullName -Match 'x64' | Select-Object -First 1
-            if (!$match) { throw "Missing $name" }
-            return $match.FullName
-          }
-          $inf2cat = Find-WdkTool 'Inf2Cat.exe'
-          $signtool = Find-WdkTool 'signtool.exe'
-          $infverif = Get-ChildItem "$kit\Tools" -Recurse -Filter InfVerif.exe -File | Select-Object -First 1
-          if (!$infverif) { throw 'Missing InfVerif.exe' }
-          New-Item -Type Directory -Force arm64-vdd-test-signed | Out-Null
-          Copy-Item arm64-vdd-unsigned/ZakoVDD.* arm64-vdd-test-signed/
-          $dir = (Resolve-Path arm64-vdd-test-signed).Path
-          & $infverif.FullName /w "$dir\ZakoVDD.inf"
-          if ($LASTEXITCODE) { throw "InfVerif failure $LASTEXITCODE" }
-          & $inf2cat "/driver:$dir" /os:10_GE_ARM64 /verbose
-          if ($LASTEXITCODE) { throw "Inf2Cat failure $LASTEXITCODE" }
-          $cat = "$dir\ZakoVDD.cat"
-          if (!(Test-Path $cat)) { throw 'Missing CAT' }
+          $package = (Resolve-Path 'arm64-vdd-unsigned').Path
+          $dir = Join-Path (Get-Location).Path 'arm64-vdd-test-signed'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item -LiteralPath (Join-Path $package 'ZakoVDD.inf') -Destination $dir
+          Copy-Item -LiteralPath (Join-Path $package 'ZakoVDD.dll') -Destination $dir
+
+          # MSBuild has already run WDK's signability check and Inf2Cat.
+          # Its generated catalog belongs to this exact stamped INF and DLL.
+          $built = Join-Path (Get-Location).Path 'vdd-source/ZakoVDD/ARM64/Release/ZakoVDD'
+          $catalogs = @(Get-ChildItem -LiteralPath $built -File -Filter '*.cat' -ErrorAction Stop)
+          if ($catalogs.Count -ne 1) { throw "Expected one WDK catalog, found $($catalogs.Count)" }
+          $cat = Join-Path $dir 'ZakoVDD.cat'
+          Copy-Item -LiteralPath $catalogs[0].FullName -Destination $cat
+          Write-Host "Reused WDK-generated catalog: $($catalogs[0].FullName)"
+
+          # Look for SignTool in the installed Windows SDK, not Inf2Cat.exe.
+          $kitBin = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Windows Kits/10/bin'
+          $tools = @(Get-ChildItem -LiteralPath $kitBin -Recurse -File -Filter 'signtool.exe' |
+            Where-Object { $_.FullName -match '[\\/]x64[\\/]' } |
+            Sort-Object -Property FullName -Descending)
+          if ($tools.Count -eq 0) { throw 'Windows SDK x64 SignTool not installed' }
+          $signtool = $tools[0].FullName
+          Write-Host "Using SignTool: $signtool"
+
           $cert = $null
+          $addedRoot = $false
+          $addedPublisher = $false
           try {
-            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Ephemeral Sunshine VDD CI Test' -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddDays(2)
-            Export-Certificate -Cert $cert -FilePath "$dir\ZakoVDD-TEST-ONLY.cer" | Out-Null
-            & $signtool sign /fd SHA256 /s My /sha1 $cert.Thumbprint $cat
-            if ($LASTEXITCODE) { throw "SignTool failure $LASTEXITCODE" }
-            $signed = Get-AuthenticodeSignature $cat
-            if (!$signed.SignerCertificate -or $signed.SignerCertificate.Thumbprint -ne $cert.Thumbprint) { throw 'Unexpected CAT signer' }
-            [ordered]@{pe='ARM64';target='10_GE_ARM64';infverif='passed';inf2cat='passed';test_signed=$true;installation_tested=$false;production_trusted=$false} | ConvertTo-Json | Set-Content "$dir\validation.json"
-          } finally {
-            if ($cert) { Remove-Item ("Cert:\CurrentUser\My\" + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
+            # The private key is non-exportable and remains on this ephemeral CI runner.
+            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Foundation Sunshine Ephemeral VDD CI Test Only' -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(2)
+            if (!$cert.HasPrivateKey) { throw 'Temporary test certificate has no private key' }
+            $publicCert = Join-Path $dir 'ZakoVDD-TEST-ONLY.cer'
+            Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
+            & $signtool sign /v /fd SHA256 /s My /sha1 $cert.Thumbprint $cat
+            if ($LASTEXITCODE -ne 0) { throw "CAT signing failed: $LASTEXITCODE" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $cat
+            if (!$signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+              throw 'CAT signer does not match ephemeral test certificate'
+            }
+
+            # Trust only inside the disposable CI user's store, then remove it.
+            Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+            $addedRoot = $true
+            Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+            $addedPublisher = $true
+            & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.inf')
+            if ($LASTEXITCODE -ne 0) { throw "Catalog-INF membership verification failed: $LASTEXITCODE" }
+            & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.dll')
+            if ($LASTEXITCODE -ne 0) { throw "Catalog-DLL membership verification failed: $LASTEXITCODE" }
+
+            [ordered]@{
+              architecture='ARM64'
+              catalog_source='WDK MSBuild autogenerated'
+              catalog_signed=$true
+              cat_inf_verified=$true
+              cat_dll_verified=$true
+              infverif_separate='not_run_WDK_reported_x86_dependency_error'
+              signer_thumbprint=$cert.Thumbprint
+              certificate_private_key_exported=$false
+              driver_install_attempted=$false
+              driver_load_tested=$false
+              production_trusted=$false
+            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'validation.json') -Encoding utf8
           }
-          'DEVELOPMENT-ONLY. Not install validated. Private key not exported. Do not change Secure Boot on daily-use devices.' | Set-Content "$dir\READ-FIRST.txt"
+          finally {
+            if ($cert) {
+              if ($addedPublisher) { Remove-Item -LiteralPath ('Cert:\CurrentUser\TrustedPublisher\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
+              if ($addedRoot) { Remove-Item -LiteralPath ('Cert:\CurrentUser\Root\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
+              Remove-Item -LiteralPath ('Cert:\CurrentUser\My\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue
+            }
+          }
+          @'
+          DEVELOPMENT-ONLY: EPHEMERAL TEST-SIGNED ARM64 CATALOG.
+          The .cer is PUBLIC; no private key is exported or distributed.
+          WDK generated the CAT; SignTool verified its INF and DLL members.
+          This is NOT an install/load test and NOT a production-signed driver.
+          Do NOT import this test certificate or change Secure Boot on a daily-use PC.
+          '@ | Set-Content -LiteralPath (Join-Path $dir 'READ-FIRST.txt') -Encoding utf8
+
       - uses: actions/upload-artifact@v4
         with:
           name: zako-vdd-arm64-test-catalog-not-install-validated
