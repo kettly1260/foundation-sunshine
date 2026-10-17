@@ -13,6 +13,7 @@ on:
       - experiment/native-mf-arm64
     paths:
       - .github/workflows/arm64-native-gui.yml
+      - scripts/arm64_gui_compat_patch.py
 
 permissions:
   contents: read
@@ -40,6 +41,12 @@ jobs:
           "GUI_SUBMODULE_SHA=$actual" >> $env:GITHUB_ENV
           Write-Host "Building pinned GUI revision $actual (not upstream HEAD)"
 
+      - name: Apply ARM64-only Tauri installer update guard
+        shell: pwsh
+        run: |
+          python scripts/arm64_gui_compat_patch.py src_assets/common/sunshine-control-panel
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 updater safety patch failed" }
+
       - name: Configure Visual Studio native ARM64 toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -49,6 +56,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: src_assets/common/sunshine-control-panel/package-lock.json
       - name: Setup Rust aarch64-pc-windows-msvc
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -121,6 +130,7 @@ jobs:
           $sha = $env:GUI_SUBMODULE_SHA
           "GUI Source: qiin2333/sunshine-control-panel@$sha" | Set-Content dist/gui/BUILD-MANIFEST.txt
           "Target: aarch64-pc-windows-msvc; Tauri GUI + matching stylus DLL" | Add-Content dist/gui/BUILD-MANIFEST.txt
+          "ARM64-only compatibility overlay: installer updates disabled" | Add-Content dist/gui/BUILD-MANIFEST.txt
           "Not a signed installer; no driver/service registration was performed." | Add-Content dist/gui/BUILD-MANIFEST.txt
           Get-FileHash (Join-Path $dir "sunshine-gui.exe") -Algorithm SHA256 | Format-List
 
