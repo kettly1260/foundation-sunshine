@@ -110,6 +110,7 @@ jobs:
           retention-days: 7
 
       - name: Test-sign and verify WDK-generated ARM64 driver catalog (no install)
+        timeout-minutes: 4
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -148,20 +149,27 @@ jobs:
             Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
             & $signtool sign /v /fd SHA256 /s My /sha1 $cert.Thumbprint $cat
             if ($LASTEXITCODE -ne 0) { throw "CAT signing failed: $LASTEXITCODE" }
-            $signature = Get-AuthenticodeSignature -LiteralPath $cat
-            if (!$signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
-              throw 'CAT signer does not match ephemeral test certificate'
-            }
+            Write-Host 'CAT successfully signed; preparing disposable user certificate trust stores'
+            # SignTool verification below checks the signature cryptographically.
+            # Avoid Get-AuthenticodeSignature here: WinVerifyTrust may block on certificate-chain retrieval.
 
             # Trust only inside the disposable CI user's store, then remove it.
+            Write-Host 'Importing temporary certificate into CurrentUser Root'
             Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
             $addedRoot = $true
+            Write-Host 'Importing temporary certificate into CurrentUser TrustedPublisher'
             Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
             $addedPublisher = $true
+            Write-Host 'Verifying test-signed CAT'
+            & $signtool verify /v /pa $cat
+            if ($LASTEXITCODE -ne 0) { throw "Catalog signature verification failed: $LASTEXITCODE" }
+            Write-Host 'Verifying INF membership'
             & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.inf')
             if ($LASTEXITCODE -ne 0) { throw "Catalog-INF membership verification failed: $LASTEXITCODE" }
+            Write-Host 'Verifying DLL membership'
             & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.dll')
             if ($LASTEXITCODE -ne 0) { throw "Catalog-DLL membership verification failed: $LASTEXITCODE" }
+            Write-Host 'Catalog and driver members verified successfully'
 
             [ordered]@{
               architecture='ARM64'
