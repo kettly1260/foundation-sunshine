@@ -138,7 +138,21 @@ jobs:
           $signtool = $tools[0].FullName
           Write-Host "Using SignTool: $signtool"
 
+          # Use the Windows certificate-store API directly, not Import-Certificate
+          # (which can block unattended CI on a self-signed Root trust prompt).
+          function Update-CiTrust([string]$storeName, [System.Security.Cryptography.X509Certificates.X509Certificate2]$publicCertificate, [bool]$add) {
+            $location = [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+            $flags = [System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite
+            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, $location)
+            $store.Open($flags)
+            try {
+              if ($add) { $store.Add($publicCertificate) }
+              else { $store.Remove($publicCertificate) }
+            }
+            finally { $store.Close() }
+          }
           $cert = $null
+          $publicOnly = $null
           $addedRoot = $false
           $addedPublisher = $false
           try {
@@ -154,11 +168,12 @@ jobs:
             # Avoid Get-AuthenticodeSignature here: WinVerifyTrust may block on certificate-chain retrieval.
 
             # Trust only inside the disposable CI user's store, then remove it.
-            Write-Host 'Importing temporary certificate into CurrentUser Root'
-            Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+            $publicOnly = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($publicCert)
+            Write-Host 'Adding ephemeral certificate to CurrentUser Root using X509Store'
+            Update-CiTrust 'Root' $publicOnly $true
             $addedRoot = $true
-            Write-Host 'Importing temporary certificate into CurrentUser TrustedPublisher'
-            Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+            Write-Host 'Adding ephemeral certificate to CurrentUser TrustedPublisher using X509Store'
+            Update-CiTrust 'TrustedPublisher' $publicOnly $true
             $addedPublisher = $true
             Write-Host 'Verifying test-signed CAT'
             & $signtool verify /v /pa $cat
@@ -187,8 +202,16 @@ jobs:
           }
           finally {
             if ($cert) {
-              if ($addedPublisher) { Remove-Item -LiteralPath ('Cert:\CurrentUser\TrustedPublisher\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
-              if ($addedRoot) { Remove-Item -LiteralPath ('Cert:\CurrentUser\Root\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
+              if ($publicOnly) {
+                if ($addedPublisher) {
+                  try { Update-CiTrust 'TrustedPublisher' $publicOnly $false }
+                  catch { Write-Warning "Cleanup of CI TrustedPublisher failed: $_" }
+                }
+                if ($addedRoot) {
+                  try { Update-CiTrust 'Root' $publicOnly $false }
+                  catch { Write-Warning "Cleanup of CI Root trust failed: $_" }
+                }
+              }
               Remove-Item -LiteralPath ('Cert:\CurrentUser\My\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue
             }
           }
