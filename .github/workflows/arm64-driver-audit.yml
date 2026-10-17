@@ -1,0 +1,63 @@
+name: Windows ARM64 virtual-device compatibility audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - scripts/arm64_driver_audit.py
+      - .github/workflows/arm64-driver-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  static-release-audit:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native ARM64 runner architecture
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "OS architecture: $arch"
+          if ($arch -ne 'Arm64') { throw "This audit must run natively on ARM64" }
+      - name: Download and analyze pinned VDD, virtual mouse and gamepad releases
+        shell: pwsh
+        run: |
+          python scripts/arm64_driver_audit.py
+          if ($LASTEXITCODE -ne 0) { throw 'Driver SHA-256 or architecture audit failed' }
+      - name: Report Windows Authenticode signature status
+        shell: pwsh
+        run: |
+          $items = Get-ChildItem arm64-driver-audit -File |
+            Where-Object { $_.Extension -in @('.exe', '.dll', '.cat') }
+          $results = foreach ($file in $items) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            $entry = [ordered]@{
+              file = $file.Name
+              signature_status = $sig.Status.ToString()
+              signer_subject = $sig.SignerCertificate.Subject
+              signer_thumbprint = $sig.SignerCertificate.Thumbprint
+              detail = $sig.StatusMessage
+            }
+            $entry
+            Write-Host ("{0}: signature={1}; signer={2}" -f $file.Name, $sig.Status, $sig.SignerCertificate.Subject)
+          }
+          $results | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 arm64-driver-audit/signature_status.json
+          Write-Host "This workflow does NOT install drivers, modify certificate trust, enable test-signing or run any installer."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-driver-compatibility-evidence
+          path: |
+            arm64-driver-audit/manifest.json
+            arm64-driver-audit/README.md
+            arm64-driver-audit/signature_status.json
+          if-no-files-found: error
