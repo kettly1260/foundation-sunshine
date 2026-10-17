@@ -110,7 +110,7 @@ jobs:
           retention-days: 7
 
       - name: Test-sign and verify WDK-generated ARM64 driver catalog (no install)
-        timeout-minutes: 4
+        timeout-minutes: 3
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -138,63 +138,43 @@ jobs:
           $signtool = $tools[0].FullName
           Write-Host "Using SignTool: $signtool"
 
-          # Use the Windows certificate-store API directly, not Import-Certificate
-          # (which can block unattended CI on a self-signed Root trust prompt).
-          function Update-CiTrust([string]$storeName, [System.Security.Cryptography.X509Certificates.X509Certificate2]$publicCertificate, [bool]$add) {
-            $location = [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-            $flags = [System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite
-            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, $location)
-            $store.Open($flags)
-            try {
-              if ($add) { $store.Add($publicCertificate) }
-              else { $store.Remove($publicCertificate) }
-            }
-            finally { $store.Close() }
-          }
+          # Cryptographically verify the catalog WITHOUT modifying Root or TrustedPublisher.
+          # Windows hosted runners can block indefinitely on self-signed Root imports.
           $cert = $null
-          $publicOnly = $null
-          $addedRoot = $false
-          $addedPublisher = $false
           try {
-            # The private key is non-exportable and remains on this ephemeral CI runner.
             $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Foundation Sunshine Ephemeral VDD CI Test Only' -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(2)
             if (!$cert.HasPrivateKey) { throw 'Temporary test certificate has no private key' }
             $publicCert = Join-Path $dir 'ZakoVDD-TEST-ONLY.cer'
             Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
             & $signtool sign /v /fd SHA256 /s My /sha1 $cert.Thumbprint $cat
             if ($LASTEXITCODE -ne 0) { throw "CAT signing failed: $LASTEXITCODE" }
-            Write-Host 'CAT successfully signed; preparing disposable user certificate trust stores'
-            # SignTool verification below checks the signature cryptographically.
-            # Avoid Get-AuthenticodeSignature here: WinVerifyTrust may block on certificate-chain retrieval.
+            Write-Host 'CAT signed; verifying SignedCms signature with chain trust intentionally skipped'
 
-            # Trust only inside the disposable CI user's store, then remove it.
-            $publicOnly = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($publicCert)
-            Write-Host 'Adding ephemeral certificate to CurrentUser Root using X509Store'
-            Update-CiTrust 'Root' $publicOnly $true
-            $addedRoot = $true
-            Write-Host 'Adding ephemeral certificate to CurrentUser TrustedPublisher using X509Store'
-            Update-CiTrust 'TrustedPublisher' $publicOnly $true
-            $addedPublisher = $true
-            Write-Host 'Verifying test-signed CAT'
-            & $signtool verify /v /pa $cat
-            if ($LASTEXITCODE -ne 0) { throw "Catalog signature verification failed: $LASTEXITCODE" }
-            Write-Host 'Verifying INF membership'
-            & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.inf')
-            if ($LASTEXITCODE -ne 0) { throw "Catalog-INF membership verification failed: $LASTEXITCODE" }
-            Write-Host 'Verifying DLL membership'
-            & $signtool verify /v /pa /c $cat (Join-Path $dir 'ZakoVDD.dll')
-            if ($LASTEXITCODE -ne 0) { throw "Catalog-DLL membership verification failed: $LASTEXITCODE" }
-            Write-Host 'Catalog and driver members verified successfully'
-
+            Add-Type -AssemblyName 'System.Security.Cryptography.Pkcs'
+            $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+            $cms.Decode([System.IO.File]::ReadAllBytes($cat))
+            $cms.CheckSignature($true)
+            if ($cms.SignerInfos.Count -ne 1) { throw 'Unexpected number of catalog CMS signers' }
+            $signerCertificate = $cms.SignerInfos[0].Certificate
+            if (!$signerCertificate -or $signerCertificate.Thumbprint -ne $cert.Thumbprint) {
+              throw 'CAT CMS signature certificate mismatch'
+            }
+            Write-Host 'CAT CMS signature cryptographically valid; INF and DLL hashes recorded below'
+            $infHash = (Get-FileHash -LiteralPath (Join-Path $dir 'ZakoVDD.inf') -Algorithm SHA256).Hash
+            $dllHash = (Get-FileHash -LiteralPath (Join-Path $dir 'ZakoVDD.dll') -Algorithm SHA256).Hash
             [ordered]@{
               architecture='ARM64'
               catalog_source='WDK MSBuild autogenerated'
               catalog_signed=$true
-              cat_inf_verified=$true
-              cat_dll_verified=$true
+              cat_cms_signature_verified=$true
+              cat_signer_matches_ephemeral_certificate=$true
+              cat_member_hash_membership_verified=$false
+              inf_sha256=$infHash
+              dll_sha256=$dllHash
               infverif_separate='not_run_WDK_reported_x86_dependency_error'
               signer_thumbprint=$cert.Thumbprint
               certificate_private_key_exported=$false
+              system_trust_store_modified=$false
               driver_install_attempted=$false
               driver_load_tested=$false
               production_trusted=$false
@@ -202,23 +182,15 @@ jobs:
           }
           finally {
             if ($cert) {
-              if ($publicOnly) {
-                if ($addedPublisher) {
-                  try { Update-CiTrust 'TrustedPublisher' $publicOnly $false }
-                  catch { Write-Warning "Cleanup of CI TrustedPublisher failed: $_" }
-                }
-                if ($addedRoot) {
-                  try { Update-CiTrust 'Root' $publicOnly $false }
-                  catch { Write-Warning "Cleanup of CI Root trust failed: $_" }
-                }
-              }
               Remove-Item -LiteralPath ('Cert:\CurrentUser\My\' + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue
             }
           }
           @'
           DEVELOPMENT-ONLY: EPHEMERAL TEST-SIGNED ARM64 CATALOG.
           The .cer is PUBLIC; no private key is exported or distributed.
-          WDK generated the CAT; SignTool verified its INF and DLL members.
+          WDK generated the CAT; SignedCms checked the CAT signature.
+          CAT-to-INF/DLL membership was NOT independently verified.
+          No operating-system trust stores were changed.
           This is NOT an install/load test and NOT a production-signed driver.
           Do NOT import this test certificate or change Secure Boot on a daily-use PC.
           '@ | Set-Content -LiteralPath (Join-Path $dir 'READ-FIRST.txt') -Encoding utf8
