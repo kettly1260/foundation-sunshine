@@ -2,6 +2,11 @@ name: ARM64 ViGEmBus signed-driver smoke (disposable CI only)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - experiment/native-mf-arm64
+    paths:
+      - .github/workflows/arm64-vigembus-smoke.yml
 
 permissions:
   contents: read
