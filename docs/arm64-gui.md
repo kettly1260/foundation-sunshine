@@ -57,6 +57,14 @@ ARM64 Sunshine installation. On your Snapdragon X Elite PC:
    experimental archive.
 6. Keep logs for GUI startup, core handshake and any plugin-load error.
 
+### Encoder selection in the current experimental UI
+
+The previously built Foundation Web UI does **not** yet list `mf_native` in
+its Advanced > Encoder dropdown. Until an ARM64-specific Core UI change is
+rebuilt and validated, retain `encoder = mf_native` in the Sunshine configuration
+file and do **not** save that dropdown as automatic/blank. Launching the Tauri
+desktop panel itself does not change the encoder selection.
+
 Windows 11 ARM64 requires a functional WebView2 runtime. This workflow does not
 install WebView2 and does not modify system-wide WebView2 settings.
 
